@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__memory-skills__recall_context"
+    ]
+  }
+}

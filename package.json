@@ -1,0 +1,52 @@
+{
+  "name": "memory-skills",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "description": "Governance-first standalone chat memory and skill service derived from TencentDB Agent Memory",
+  "license": "MIT",
+  "files": [
+    "dist/",
+    "web/dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "install:all": "npm install && npm --prefix web install",
+    "test": "npm run test:server && npm run test:web",
+    "test:server": "node --import tsx --test tests/**/*.test.ts",
+    "test:web": "npm --prefix web test",
+    "typecheck": "tsc --noEmit && npm --prefix web run typecheck",
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsc -p tsconfig.build.json",
+    "build:web": "npm --prefix web run build",
+    "eval:retrieval": "node --import tsx evals/run-context-recall.ts",
+    "eval:retrieval:strict": "node --import tsx evals/run-context-recall.ts --strict",
+    "start": "node dist/server.js",
+    "mcp": "node dist/adapters/mcp/server.js",
+    "dev": "tsx src/server.ts",
+    "dev:web": "npm --prefix web run dev"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  }
+}
