@@ -34,7 +34,7 @@ export interface RetrieverEnvOptions {
  * - MEMORY_SKILLS_RETRIEVAL：lexical（默认）/ hybrid；
  * - hybrid 时按 Embedding 配置创建 Provider 与向量索引，
  *   并读取 MEMORY_SKILLS_HYBRID_LEXICAL_WEIGHT / _VECTOR_WEIGHT（默认 1）
- *   与 MEMORY_SKILLS_HYBRID_MIN_COSINE（默认 0.2）。
+ *   与 MEMORY_SKILLS_HYBRID_MIN_COSINE（默认 0.5，模型相关，见 docs/retrieval.md）。
  * 默认保持词法：只有真实模型评测证明指标显著提升且命中不退化后，
  * 才应该把部署配置切到 hybrid。
  */
@@ -54,7 +54,7 @@ export function resolveRetrieverFromEnv(
 
   const lexicalWeight = optionalPositiveNumber(environment.MEMORY_SKILLS_HYBRID_LEXICAL_WEIGHT, "MEMORY_SKILLS_HYBRID_LEXICAL_WEIGHT") ?? 1;
   const vectorWeight = optionalPositiveNumber(environment.MEMORY_SKILLS_HYBRID_VECTOR_WEIGHT, "MEMORY_SKILLS_HYBRID_VECTOR_WEIGHT") ?? 1;
-  const minVectorCosine = optionalUnitNumber(environment.MEMORY_SKILLS_HYBRID_MIN_COSINE, "MEMORY_SKILLS_HYBRID_MIN_COSINE") ?? 0.2;
+  const minVectorCosine = optionalUnitNumber(environment.MEMORY_SKILLS_HYBRID_MIN_COSINE, "MEMORY_SKILLS_HYBRID_MIN_COSINE") ?? 0.5;
 
   const retriever = new HybridRetriever(provider, index, { lexicalWeight, vectorWeight, minVectorCosine });
   return { retriever, embedding: { provider, index, config, minVectorCosine } };

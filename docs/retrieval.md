@@ -51,7 +51,7 @@ ContextService
 | `MEMORY_SKILLS_EMBEDDING_API_KEY_ENV` | `OPENAI_API_KEY` | 密钥环境变量名（引用，不是密钥值） |
 | `MEMORY_SKILLS_EMBEDDING_TIMEOUT_MS` / `_MAX_RETRIES` / `_BATCH_SIZE` | 30000 / 1 / 16 | 超时、额外重试、同步批量 |
 | `MEMORY_SKILLS_HYBRID_LEXICAL_WEIGHT` / `_VECTOR_WEIGHT` | 1 / 1 | 融合权重 |
-| `MEMORY_SKILLS_HYBRID_MIN_COSINE` | 0.2 | 向量通道激活阈值（精确率护栏） |
+| `MEMORY_SKILLS_HYBRID_MIN_COSINE` | 0.5 | 向量通道激活阈值（精确率护栏，模型相关，见下文评测数据） |
 
 向量索引与主库同用一个 SQLite 文件（`asset_embeddings` 表，WAL 支持并发读写）。
 
@@ -67,13 +67,31 @@ curl -X POST "$MEMORY_SKILLS_URL/v1/retrieval/sync" \
 
 增量策略：内容指纹（SHA-256 前 32 位）未变跳过；已归档/删除资产的向量行清理。Verify/Reject 新资产后重跑一次同步即可进入向量索引。
 
-## 启用门槛（为什么默认是 lexical）
+## 启用门槛与真实模型评测结论（2026-08-20）
 
-按开发计划的发布门槛："只有评测集 Recall/Precision 有显著提升且禁止命中不退化时才默认开启"。当前状态：
+按开发计划的发布门槛："只有评测集 Recall/Precision 有显著提升且禁止命中不退化时才默认开启"。
 
-- `npm run eval:retrieval`——词法路径的基线门禁（基线 `evals/baselines/context-recall.v0.3.json`，含真实失败样本新增的语义改写用例 zh-057~059 / en-023，词法对它们零命中，是混合检索的目标收益）；
-- `npm run eval:retrieval -- --hybrid`——用 Mock 零向量走完整混合管线，断言与词法路径**逐用例一致**，证明接入本身零回归；
-- 真实语义增益需要用真实 Embedding 模型跑 smoke 评测衡量，指标显著提升后再把部署配置切到 `hybrid`。
+**词法侧护栏（离线、确定性）：**
+
+- `npm run eval:retrieval`——词法路径的基线门禁（基线 `evals/baselines/context-recall.v0.3.json`，含语义改写用例 zh-057~059 / en-023，词法对它们零命中）；
+- `npm run eval:retrieval -- --hybrid`——Mock 零向量走完整混合管线，断言与词法路径逐用例一致，证明接入本身零回归。
+
+**真实模型测量（`MEMORY_SKILLS_SMOKE=1 npm run smoke:retrieval-hybrid`）：**
+
+用 OpenAI 兼容中转端点对两份评测夹具做参数网格扫描（阈值 × 权重），结论：
+
+| 模型 | 零退化所需 minCos | 该点的收益 | 语义改写命中 |
+| --- | --- | --- | --- |
+| text-embedding-3-small | ≈0.60 | 12 用例改善，聚合 Recall +0.098 | 0/4（收益被阈值吃掉） |
+| text-embedding-3-large | 0.50 | 22 用例改善，聚合 Recall +0.205 / MRR +0.213 / Precision +0.013，禁止命中增量 0 | 3/4（zh-057~059 全中） |
+
+关键发现：
+
+1. **权重不是主导参数**（1:1 与 3:1 差异在噪声内），阈值才是——small 模型对中文的余弦各向异性严重（无关对普遍 0.3~0.55，与改写对 0.5~0.6 区间重叠），没有全局阈值能同时挡住无关对、放进改写对；large 的判别力显著更强。
+2. **均值中心化（余弦减候选集背景均值）未能根治**，只把可用点略微提前。
+3. 残余的边界模糊用例（如"怎么提高英语阅读速度" vs 阅读器资产、"日历软件推荐" vs 自家日历 App）属于"话题相近但事实无关"，需要 Reranker（Task 11）或更强的模型判别，不是阈值能解决的。
+
+**推荐配置**（已写入本地 `.env`，`text-embedding-3-large` + `MEMORY_SKILLS_HYBRID_MIN_COSINE=0.5`）在评测集上满足启用门槛：显著提升且禁止命中零退化。注意 large 经中转的延迟明显高于 small（单次可达数十秒级偶尔超时，建议配 `MEMORY_SKILLS_EMBEDDING_TIMEOUT_MS=60000`）；若更看重延迟可回退 small + 阈值 0.6，收益缩小但仍然为正。换任何新模型后应先重跑 smoke 扫描再调阈值。
 
 ## Mock 零向量的取舍
 

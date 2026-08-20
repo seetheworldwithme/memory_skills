@@ -34,6 +34,7 @@
     "eval:retrieval": "node --import tsx evals/run-context-recall.ts",
     "eval:retrieval:strict": "node --import tsx evals/run-context-recall.ts --strict",
     "smoke:model-provider": "npm run build:server && node --env-file-if-exists=.env scripts/smoke-model-provider.mjs",
+    "smoke:retrieval-hybrid": "npm run build:server && node --env-file-if-exists=.env scripts/smoke-retrieval-hybrid.mjs",
     "start": "node --env-file-if-exists=.env dist/server.js",
     "mcp": "node dist/adapters/mcp/server.js",
     "dev": "tsx src/server.ts",

@@ -112,6 +112,10 @@ export class OpenAiCompatibleEmbeddingProvider implements EmbeddingProvider {
     try {
       payload = await response.json();
     } catch (error) {
+      // 响应体读取期间超时：归为 timeout（可重试），不能误判为不可重试的响应结构错误
+      if (timeoutSignal.aborted) {
+        throw new LlmProviderError("timeout", "Embedding 调用超时", { cause: error });
+      }
       throw new LlmProviderError("invalid_response", "Embedding 响应体不是合法 JSON", { cause: error });
     }
 

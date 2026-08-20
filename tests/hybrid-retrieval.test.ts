@@ -282,6 +282,7 @@ test("ContextService 注入 HybridRetriever 后契约携带策略与降级警告
 
     const provider = new FakeEmbeddingProvider(new Map([
       ["我是谁", [1, 0]],
+      ["回答天选之子", [1, 0]],
       ["用户问我是谁的时候回答天选之子", [1, 0]],
     ]));
     const index = memoryIndex(provider);
@@ -296,9 +297,9 @@ test("ContextService 注入 HybridRetriever 后契约携带策略与降级警告
     assert.ok(response.memories[0]!.match.score > 0);
     assert.deepEqual(response.warnings, []);
 
-    // Provider 故障：召回不失败，降级为词法并返回警告
+    // Provider 故障：换一个未命中查询缓存的查询，召回不失败，降级为词法并返回警告
     provider.failNext = true;
-    const degraded = await context.recall({ query: "我是谁", scope });
+    const degraded = await context.recall({ query: "回答天选之子", scope });
     assert.equal(degraded.memories[0]!.match.strategy, "lexical");
     assert.deepEqual(degraded.warnings.map((warning) => warning.code), ["RETRIEVAL_DEGRADED_LEXICAL"]);
   } finally {

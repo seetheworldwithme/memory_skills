@@ -17,8 +17,11 @@ export interface HybridRetrieverOptions {
   /** 向量通道权重，默认 1，必须为正数。 */
   vectorWeight?: number;
   /**
-   * 向量通道激活阈值：余弦 >= 该值才参与融合与入选，默认 0.2。
+   * 向量通道激活阈值：余弦 >= 该值才参与融合与入选，默认 0.5。
    * 阈值挡住无关资产（含 Mock 零向量），是精确率的主要护栏。
+   * 注意阈值与模型强相关：text-embedding-3-small 约 0.6、large 约 0.5
+   * 才能零退化（见 docs/retrieval.md 的真实模型评测数据），换模型后
+   * 应先用 npm run smoke:retrieval-hybrid 重新扫描。
    */
   minVectorCosine?: number;
   /**
@@ -49,6 +52,9 @@ export interface HybridRetrieverOptions {
  * 可用性约束：查询向量或索引任何一步失败都降级为纯词法排序，
  * 召回读路径绝不因 Embedding 服务故障而失败。
  */
+/** 查询向量进程内缓存上限；同一查询在多资产类型（memory/skill）间复用同一向量。 */
+const QUERY_VECTOR_CACHE_LIMIT = 256;
+
 export class HybridRetriever implements Retriever {
   readonly strategy = "hybrid" as const;
 
@@ -56,6 +62,8 @@ export class HybridRetriever implements Retriever {
   private readonly vectorWeight: number;
   private readonly minVectorCosine: number;
   private readonly vectorCandidateLimit: number;
+  /** 查询向量缓存：同一次 recall 会对 memory/skill 各调一次 rank，避免重复嵌入。 */
+  private readonly queryVectorCache = new Map<string, number[]>();
 
   constructor(
     private readonly provider: EmbeddingProvider,
@@ -64,7 +72,7 @@ export class HybridRetriever implements Retriever {
   ) {
     this.lexicalWeight = options.lexicalWeight ?? 1;
     this.vectorWeight = options.vectorWeight ?? 1;
-    this.minVectorCosine = options.minVectorCosine ?? 0.2;
+    this.minVectorCosine = options.minVectorCosine ?? 0.5;
     this.vectorCandidateLimit = options.vectorCandidateLimit ?? 50;
     if (!(this.lexicalWeight > 0) || !Number.isFinite(this.lexicalWeight)) {
       throw new Error("lexicalWeight must be a positive finite number");
@@ -89,8 +97,7 @@ export class HybridRetriever implements Retriever {
 
     let cosines: Map<string, number> | undefined;
     try {
-      const embedded = await this.provider.embed({ texts: [query] });
-      const queryVector = embedded.vectors[0];
+      const queryVector = await this.embedQuery(query);
       if (!queryVector || queryVector.length === 0) throw new Error("empty query embedding");
       const matches = await this.index.search({
         vector: queryVector,
@@ -147,5 +154,24 @@ export class HybridRetriever implements Retriever {
       candidates: options.limit === undefined ? scored : scored.slice(0, options.limit),
       vectorDegraded: false,
     };
+  }
+
+  /**
+   * 查询向量带缓存：失败不缓存（下次重试），缓存满时淘汰最早条目。
+   * 缓存不影响结果确定性——同一查询永远得到同一向量。
+   */
+  private async embedQuery(query: string): Promise<number[] | undefined> {
+    const cached = this.queryVectorCache.get(query);
+    if (cached) return cached;
+    const embedded = await this.provider.embed({ texts: [query] });
+    const vector = embedded.vectors[0];
+    if (vector && vector.length > 0) {
+      if (this.queryVectorCache.size >= QUERY_VECTOR_CACHE_LIMIT) {
+        const oldest = this.queryVectorCache.keys().next().value;
+        if (oldest !== undefined) this.queryVectorCache.delete(oldest);
+      }
+      this.queryVectorCache.set(query, vector);
+    }
+    return vector;
   }
 }
