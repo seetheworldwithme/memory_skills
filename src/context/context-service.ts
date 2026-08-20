@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 import type { MemoryService } from "../memory/memory-service.js";
 import type { SkillService } from "../skills/skill-service.js";
 import { lexicalScore, matchedQueryTerms } from "../retrieval/text-match.js";
+import type { EventSink } from "../observability/event-sink.js";
+import {
+  EVENT_SCHEMA_VERSION,
+  errorCodeFor,
+  type ContextRecallCompletedEvent,
+  type ContextRecallFailedEvent,
+} from "../observability/events.js";
 import type { ContextRecallInput } from "./types.js";
 import {
   CONTRACT_VERSION,
@@ -14,14 +22,45 @@ import {
   type MatchMetadata,
 } from "./contract.js";
 
+/** 可观测性注入项：事件输出与计时函数均可替换，便于测试。 */
+export interface ContextObservability {
+  eventSink?: EventSink;
+  now?: () => number;
+}
+
 export class ContextService {
+  private readonly eventSink: EventSink | undefined;
+  private readonly now: () => number;
+
   constructor(
     private readonly memory: MemoryService,
     private readonly skills: SkillService,
     private readonly newRequestId: () => string = randomUUID,
-  ) {}
+    observability: ContextObservability = {},
+  ) {
+    this.eventSink = observability.eventSink;
+    this.now = observability.now ?? (() => performance.now());
+  }
 
   recall(input: ContextRecallInput): ContextRecallResponse {
+    const requestId = this.newRequestId();
+    const startedAt = this.now();
+    try {
+      const { response, memoryCandidates, skillCandidates } = this.recallInternal(input, requestId);
+      this.emitCompleted(input, response, memoryCandidates, skillCandidates, startedAt);
+      return response;
+    } catch (error) {
+      this.emitFailed(input, requestId, startedAt, error);
+      throw error;
+    }
+  }
+
+  /** 候选计数随响应一起返回，供诊断事件区分"候选数"和"最终返回数"。 */
+  private recallInternal(input: ContextRecallInput, requestId: string): {
+    response: ContextRecallResponse;
+    memoryCandidates: number;
+    skillCandidates: number;
+  } {
     const maxMemoryResults = positiveInteger(input.maxMemoryResults ?? 5, "maxMemoryResults");
     const maxMemoryChars = positiveInteger(input.maxMemoryChars ?? 4_000, "maxMemoryChars");
     const maxSkillResults = positiveInteger(input.maxSkillResults ?? 3, "maxSkillResults");
@@ -91,22 +130,82 @@ export class ContextService {
     };
 
     return {
-      contractVersion: CONTRACT_VERSION,
-      requestId: this.newRequestId(),
-      query: input.query,
-      scope: input.scope,
-      memories,
-      skills,
-      budget,
-      truncated: memoryTruncated || skillTruncated,
-      warnings,
+      response: {
+        contractVersion: CONTRACT_VERSION,
+        requestId,
+        query: input.query,
+        scope: input.scope,
+        memories,
+        skills,
+        budget,
+        truncated: memoryTruncated || skillTruncated,
+        warnings,
+      },
+      memoryCandidates: rankedMemories.length,
+      skillCandidates: matchedSkills.length,
     };
+  }
+
+  /** 召回成功事件：只携带计数、预算、策略与耗时，不携带任何正文。 */
+  private emitCompleted(
+    input: ContextRecallInput,
+    response: ContextRecallResponse,
+    memoryCandidates: number,
+    skillCandidates: number,
+    startedAt: number,
+  ): void {
+    if (!this.eventSink) return;
+    const strategies = new Set<string>();
+    for (const memory of response.memories) strategies.add(memory.match.strategy);
+    for (const skill of response.skills) strategies.add(skill.match.strategy);
+    const event: ContextRecallCompletedEvent = {
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      eventType: "context.recall.completed",
+      timestamp: new Date().toISOString(),
+      requestId: response.requestId,
+      contractVersion: response.contractVersion,
+      scope: input.scope,
+      durationMs: roundDuration(this.now() - startedAt),
+      queryChars: input.query.length,
+      includeDraft: input.includeDraft === true,
+      memoryCandidates,
+      memoryReturned: response.memories.length,
+      maxMemoryResults: response.budget.maxMemoryResults,
+      maxMemoryChars: response.budget.maxMemoryChars,
+      usedMemoryChars: response.budget.usedMemoryChars,
+      skillCandidates,
+      skillReturned: response.skills.length,
+      maxSkillResults: response.budget.maxSkillResults,
+      maxSkillChars: response.budget.maxSkillChars,
+      usedSkillChars: response.budget.usedSkillChars,
+      truncated: response.truncated,
+      warningCodes: response.warnings.map((warning) => warning.code),
+      matchStrategies: [...strategies],
+    };
+    this.eventSink.emit(event);
+  }
+
+  /** 召回失败事件：只携带错误码与错误名，避免错误消息拼接用户内容。 */
+  private emitFailed(input: ContextRecallInput, requestId: string, startedAt: number, error: unknown): void {
+    if (!this.eventSink) return;
+    const event: ContextRecallFailedEvent = {
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      eventType: "context.recall.failed",
+      timestamp: new Date().toISOString(),
+      requestId,
+      scope: input.scope,
+      durationMs: roundDuration(this.now() - startedAt),
+      queryChars: input.query.length,
+      errorCode: errorCodeFor(error),
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    };
+    this.eventSink.emit(event);
   }
 }
 
 /**
- * MemoryService.recallRanked slices by maxResults before the char budget is applied here,
- * so request extra headroom to distinguish "dropped by count" from "dropped by chars".
+ * MemoryService.recallRanked 在应用字符预算前就按 maxResults 截断，
+ * 因此这里多取一倍余量，用于区分"按条数丢弃"和"按字符预算截断"。
  */
 const RESULT_HEADROOM = 2;
 
@@ -125,4 +224,8 @@ function skillSearchText(skill: { name: string; description: string; content: st
 function positiveInteger(value: number, field: string): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${field} must be a positive integer`);
   return value;
+}
+
+function roundDuration(durationMs: number): number {
+  return Number(durationMs.toFixed(3));
 }

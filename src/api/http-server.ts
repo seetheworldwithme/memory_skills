@@ -10,12 +10,20 @@ import type { SqliteRepository } from "../storage/sqlite-repository.js";
 import { DomainError } from "../errors.js";
 import { GovernanceError } from "../governance/lifecycle.js";
 import { ContextService } from "../context/context-service.js";
+import type { EventSink } from "../observability/event-sink.js";
 
-export function createMemorySkillsServer(options: { repository: SqliteRepository; accessKey: string; webRoot?: string }): Server {
+export function createMemorySkillsServer(options: {
+  repository: SqliteRepository;
+  accessKey: string;
+  webRoot?: string;
+  eventSink?: EventSink;
+}): Server {
   if (!options.accessKey.trim()) throw new Error("accessKey must not be empty");
   const memory = new MemoryService(options.repository);
   const skills = new SkillService(options.repository);
-  const context = new ContextService(memory, skills);
+  const context = new ContextService(memory, skills, undefined, {
+    ...(options.eventSink === undefined ? {} : { eventSink: options.eventSink }),
+  });
 
   return createServer(async (request, response) => {
     try {
