@@ -3,22 +3,27 @@ import type { RecalledMemory } from "../memory/types.js";
 import type { RecalledSkill } from "./types.js";
 
 /**
- * Versioned context recall contract shared by the HTTP API and the MCP adapter.
+ * HTTP API 与 MCP 适配器共享的版本化上下文召回契约。
  *
- * Compatibility rules:
- * - Adding optional fields or new warning codes keeps the version unchanged.
- * - Removing fields, renaming fields, or changing semantics bumps CONTRACT_VERSION.
+ * 兼容性规则：
+ * - 新增可选字段或新告警码，版本号不变；
+ * - 删除字段、改名字段或改变语义，必须提升 CONTRACT_VERSION。
  */
 export const CONTRACT_VERSION = 1;
 
-export type MatchStrategy = "lexical";
+/**
+ * 命中策略：lexical 为纯词法；vector 为纯语义向量命中（词法零命中）；
+ * hybrid 为两通道同时命中后的融合分。向后兼容地扩展自 "lexical"，
+ * 消费方按字符串处理即可。
+ */
+export type MatchStrategy = "lexical" | "vector" | "hybrid";
 
 export interface MatchMetadata {
-  /** Which retrieval strategy produced this item; never exposes storage detail. */
+  /** 产生该结果的检索策略；不暴露存储细节。 */
   strategy: MatchStrategy;
-  /** Normalized relevance score in (0, 1]. */
+  /** 归一化相关性分数，范围 (0, 1]。 */
   score: number;
-  /** Query fragments that matched this item. */
+  /** 查询中实际命中该资产的片段。 */
   matchedTerms: string[];
 }
 
@@ -34,7 +39,8 @@ export type WarningCode =
   | "MEMORY_BUDGET_TRUNCATED"
   | "SKILL_BUDGET_TRUNCATED"
   | "MEMORY_RESULTS_DROPPED"
-  | "SKILL_RESULTS_DROPPED";
+  | "SKILL_RESULTS_DROPPED"
+  | "RETRIEVAL_DEGRADED_LEXICAL";
 
 export interface ContractWarning {
   code: WarningCode;

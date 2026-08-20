@@ -79,6 +79,43 @@ claude mcp add memory-skills --scope local \
   -- node "$PWD/dist/adapters/mcp/server.js"
 ```
 
+## SessionEnd 半自动捕获（Evidence 层）
+
+有价值对话无需再手动 POST：`scripts/session-end-capture.mjs` 在 Claude Code
+会话结束时读取转录文件，把用户消息与助手回复的摘要自动送入
+`POST /v1/evidence`。治理边界不变：hook 只自动捕获证据，提案仍需人工触发
+`POST /v1/proposals/*/run`，审核仍必须人工 Verify。
+
+在项目级 `.claude/settings.json`（或用户级 `~/.claude/settings.json`）中挂载：
+
+```json
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/memory_skills/scripts/session-end-capture.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+运行环境需提供 `MEMORY_SKILLS_URL` 与 `MEMORY_SKILLS_ACCESS_KEY`（作用域变量
+`MEMORY_SKILLS_USER_ID` 等可选，默认与 MCP 适配器一致）。证据 ID 携带内容指纹：
+同一会话重复触发且摘要未变时幂等。hook 任何失败都静默退出，不影响会话收尾。
+
+## Hybrid retrieval（混合检索）
+
+服务默认词法检索；配置 `MEMORY_SKILLS_RETRIEVAL=hybrid` 并配齐 Embedding
+环境变量后，`/v1/context/recall` 走词法 + 向量双通道确定性融合，向量故障自动
+降级为词法。启用后需按作用域调用 `POST /v1/retrieval/sync` 同步向量索引。
+设计、环境变量与启用门槛见 `docs/retrieval.md`。
+
 ## Attribution
 
 Portions of the architecture and domain semantics are derived from TencentDB

@@ -32,6 +32,8 @@ export interface ContextRecallCompletedEvent extends EventEnvelope {
   eventType: "context.recall.completed";
   requestId: string;
   contractVersion: number;
+  /** 检索策略：lexical / hybrid；向后兼容的可选新增字段。 */
+  retrievalStrategy?: string;
   scope: Scope;
   durationMs: number;
   queryChars: number;
@@ -83,7 +85,7 @@ export type ObservabilityEvent =
 const FIELD_ALLOWLIST: Record<ObservabilityEventType, readonly string[]> = {
   "service.started": ["host", "port", "databasePath"],
   "context.recall.completed": [
-    "requestId", "contractVersion", "scope", "durationMs", "queryChars", "includeDraft",
+    "requestId", "contractVersion", "retrievalStrategy", "scope", "durationMs", "queryChars", "includeDraft",
     "memoryCandidates", "memoryReturned", "maxMemoryResults", "maxMemoryChars", "usedMemoryChars",
     "skillCandidates", "skillReturned", "maxSkillResults", "maxSkillChars", "usedSkillChars",
     "truncated", "warningCodes", "matchStrategies",

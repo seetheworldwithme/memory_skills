@@ -76,7 +76,7 @@ test("scoreCase treats empty-expected forbidden-only cases honestly", () => {
   assert.equal(polluted.forbiddenHits, 1);
 });
 
-test("evaluateCorpus replays the real retrieval stack deterministically", () => {
+test("evaluateCorpus replays the real retrieval stack deterministically", async () => {
   const corpus: EvaluationCorpus = {
     ...CORPUS,
     cases: [
@@ -84,8 +84,8 @@ test("evaluateCorpus replays the real retrieval stack deterministically", () => 
       { id: "t2", query: "今天天气怎么样", expectedIds: [], forbiddenIds: ["mem-a", "mem-b", "skill-a"], note: "" },
     ],
   };
-  const first = evaluateCorpus(corpus);
-  const second = evaluateCorpus(corpus);
+  const first = await evaluateCorpus(corpus);
+  const second = await evaluateCorpus(corpus);
   assert.deepEqual(first, second);
 
   const identity = first.find((metric) => metric.caseId === "t1")!;
@@ -94,7 +94,7 @@ test("evaluateCorpus replays the real retrieval stack deterministically", () => 
   assert.equal(unrelated.forbiddenHits, 0);
 });
 
-test("aggregateReports separates critical gate metrics from aggregate metrics", () => {
+test("aggregateReports separates critical gate metrics from aggregate metrics", async () => {
   const corpus: EvaluationCorpus = {
     ...CORPUS,
     cases: [
@@ -102,7 +102,7 @@ test("aggregateReports separates critical gate metrics from aggregate metrics", 
       { id: "t2", query: "字体", expectedIds: ["mem-b"], forbiddenIds: [], note: "" },
     ],
   };
-  const report = aggregateReports("fixture", corpus, evaluateCorpus(corpus));
+  const report = aggregateReports("fixture", corpus, await evaluateCorpus(corpus));
   assert.equal(report.totalCases, 2);
   assert.equal(report.criticalCases, 1);
   assert.equal(report.criticalRecall, 1);

@@ -98,7 +98,11 @@ POST /v1/context/recall
 
 The response is a versioned context contract (`contractVersion: 1`). The REST
 API and the MCP adapter's `structuredContent` share this exact schema; the MCP
-text block is only a compatibility view of the same object.
+text block is only a compatibility view of the same object. 检索默认走词法排序；
+服务端配置 `MEMORY_SKILLS_RETRIEVAL=hybrid` 后按混合排序（词法 + 向量融合），
+向量通道故障时自动降级为词法并在 `warnings` 中返回
+`RETRIEVAL_DEGRADED_LEXICAL`，召回本身不会失败。`match.strategy` 可能是
+`lexical` / `vector` / `hybrid`，详见 `docs/retrieval.md`。
 
 ```json
 {
@@ -181,6 +185,36 @@ POST /v1/evidence/get
 ```
 
 返回 `{ "items": [Evidence] }`；不在该作用域内的 ID 会被静默过滤。
+
+## Sync vector index（人工触发的向量索引同步）
+
+```http
+POST /v1/retrieval/sync
+```
+
+```json
+{
+  "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" },
+  "includeDraft": false
+}
+```
+
+仅当服务端以 `MEMORY_SKILLS_RETRIEVAL=hybrid` 启动并成功装配 Embedding
+Provider 时可用，否则返回 `503 EMBEDDING_CONFIG_ERROR`。同步只把该作用域内
+可召回（已通过治理过滤）资产的最新正文写入向量索引：
+
+- 内容指纹未变的资产跳过重嵌（增量）；
+- 已归档/删除资产的向量行会被清理；
+- 返回计数报告（`scanned` / `embedded` / `unchanged` / `removed`），不含任何正文。
+
+```json
+{
+  "model": "text-embedding-3-small",
+  "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" },
+  "memories": { "scanned": 42, "embedded": 5, "unchanged": 37, "removed": 1 },
+  "skills": { "scanned": 8, "embedded": 2, "unchanged": 6, "removed": 0 }
+}
+```
 
 ## Run memory proposals（人工触发的记忆提案）
 

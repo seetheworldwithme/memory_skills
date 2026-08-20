@@ -1,22 +1,25 @@
 /**
- * Deterministic offline retrieval evaluation for context recall.
+ * 确定性离线检索评测：context recall。
  *
- * Loads JSONL fixture corpora, replays every case through the real
- * ContextService + SqliteRepository stack (in-memory), and prints
- * Recall@K / Precision@K / MRR / forbidden-hit rate / average returned chars.
+ * 加载 JSONL 评测夹具，把每个用例回放到真实 ContextService + SqliteRepository
+ * 栈（内存库），输出 Recall@K / Precision@K / MRR / 禁止命中率 / 平均返回字符数。
  *
- * Gates:
- * - Baseline gate (default): aggregate Precision@K and MRR must not regress
- *   below the recorded baseline (evals/baselines/context-recall.v0.2.json).
- * - Hard gate (--strict, release threshold): critical identity/preference
- *   cases must reach Recall@K = 1 with zero forbidden hits.
+ * 门禁：
+ * - 基线门禁（默认）：词法路径的聚合 Precision@K 与 MRR 不得低于已记录基线
+ *   （evals/baselines/context-recall.v0.3.json）；
+ * - 硬门禁（--strict，发布阈值）：关键身份/偏好用例 Recall@K 必须为 1 且零禁止命中。
  *
- * Exit codes: 0 within gates, 1 on any failure.
- * Flags: --save-baseline rewrites the baseline file, --verbose prints
- * returned ids per case, --strict enables the release hard gate.
+ * 混合检索验证（--hybrid）：用 Mock 零向量 Provider 走完整混合管线
+ * （Embedding 同步 → 向量索引 → 融合排序），断言结果与词法路径逐位一致——
+ * 证明混合接入不带来回归；语义增益需用真实模型的 smoke 评测衡量。
+ *
+ * 退出码：门禁内为 0，任何失败为 1。
+ * 标志：--save-baseline 重写基线文件；--verbose 打印每个用例的返回 ID；
+ * --strict 启用发布硬门禁；--hybrid 附加混合管线一致性验证。
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +27,10 @@ import { ContextService } from "../src/context/context-service.js";
 import { MemoryService } from "../src/memory/memory-service.js";
 import { SkillService } from "../src/skills/skill-service.js";
 import { SqliteRepository } from "../src/storage/sqlite-repository.js";
+import { HybridRetriever } from "../src/retrieval/hybrid-retriever.js";
+import { MockEmbeddingProvider } from "../src/retrieval/mock-embedding-provider.js";
+import { SqliteVectorIndex } from "../src/retrieval/vector-index.js";
+import { EmbeddingSyncService } from "../src/retrieval/embedding-sync.js";
 import type {
   CaseMetrics,
   EvaluationAsset,
@@ -37,8 +44,8 @@ const FIXTURES = [
   "fixtures/context-recall.zh-CN.jsonl",
   "fixtures/context-recall.en.jsonl",
 ] as const;
-const BASELINE_PATH = resolve(EVAL_ROOT, "baselines/context-recall.v0.2.json");
-/** Relative regression tolerance so float noise doesn't fail CI. */
+const BASELINE_PATH = resolve(EVAL_ROOT, "baselines/context-recall.v0.3.json");
+/** 相对退化容差，避免浮点噪声导致 CI 失败。 */
 const REGRESSION_TOLERANCE = 1e-9;
 
 interface Baseline {
@@ -76,31 +83,63 @@ export function parseFixture(raw: string): EvaluationCorpus {
   return { ...corpus, cases };
 }
 
-export function evaluateCorpus(corpus: EvaluationCorpus, verbose = false): CaseMetrics[] {
+export async function evaluateCorpus(corpus: EvaluationCorpus, verbose = false): Promise<CaseMetrics[]> {
   const repository = new SqliteRepository(":memory:");
   try {
     seedAssets(repository, corpus.now, corpus.assets);
     const context = new ContextService(new MemoryService(repository), new SkillService(repository));
-    const scope = { userId: "eval", teamId: "eval", agentId: "eval" };
-    return corpus.cases.map((evaluationCase) => {
-      const response = context.recall({
-        query: evaluationCase.query,
-        scope,
-        maxMemoryResults: 20,
-        maxMemoryChars: 50_000,
-        maxSkillResults: 20,
-        maxSkillChars: 50_000,
-      });
-      const returnedIds = [
-        ...response.memories.map((memory) => memory.id),
-        ...response.skills.map((skill) => skill.id),
-      ];
-      if (verbose) console.log(`  [${evaluationCase.id}] <- ${JSON.stringify(returnedIds)}`);
-      return scoreCase(evaluationCase, returnedIds, response.budget.usedMemoryChars + response.budget.usedSkillChars);
-    });
+    return await replayCases(context, corpus, verbose);
   } finally {
     repository.close();
   }
+}
+
+/**
+ * 用 Mock 零向量 Provider 走完整混合管线后回放同一份用例：
+ * 向量通道永不激活，结果必须与词法路径逐位一致（混合接入的无回归证明）。
+ */
+export async function evaluateCorpusHybrid(corpus: EvaluationCorpus, verbose = false): Promise<CaseMetrics[]> {
+  const repository = new SqliteRepository(":memory:");
+  const vectorDb = new DatabaseSync(":memory:");
+  try {
+    seedAssets(repository, corpus.now, corpus.assets);
+    const memory = new MemoryService(repository);
+    const skills = new SkillService(repository);
+    const provider = new MockEmbeddingProvider();
+    const index = new SqliteVectorIndex(provider.model, ":memory:", vectorDb);
+    await new EmbeddingSyncService(memory, skills, provider, index).sync({ scope: evalScope() });
+    const context = new ContextService(memory, skills, undefined, {}, {
+      retriever: new HybridRetriever(provider, index),
+    });
+    return await replayCases(context, corpus, verbose);
+  } finally {
+    repository.close();
+    vectorDb.close();
+  }
+}
+
+function evalScope() {
+  return { userId: "eval", teamId: "eval", agentId: "eval" };
+}
+
+async function replayCases(context: ContextService, corpus: EvaluationCorpus, verbose: boolean): Promise<CaseMetrics[]> {
+  const scope = evalScope();
+  return Promise.all(corpus.cases.map(async (evaluationCase) => {
+    const response = await context.recall({
+      query: evaluationCase.query,
+      scope,
+      maxMemoryResults: 20,
+      maxMemoryChars: 50_000,
+      maxSkillResults: 20,
+      maxSkillChars: 50_000,
+    });
+    const returnedIds = [
+      ...response.memories.map((memory) => memory.id),
+      ...response.skills.map((skill) => skill.id),
+    ];
+    if (verbose) console.log(`  [${evaluationCase.id}] <- ${JSON.stringify(returnedIds)}`);
+    return scoreCase(evaluationCase, returnedIds, response.budget.usedMemoryChars + response.budget.usedSkillChars);
+  }));
 }
 
 export function scoreCase(evaluationCase: EvaluationCase, returnedIds: string[], returnedChars: number): CaseMetrics {
@@ -166,7 +205,7 @@ export function aggregateReports(
 function seedAssets(repository: SqliteRepository, now: string, assets: EvaluationAsset[]): void {
   const memory = new MemoryService(repository, () => new Date(now));
   const skills = new SkillService(repository, () => new Date(now));
-  const scope = { userId: "eval", teamId: "eval", agentId: "eval" };
+  const scope = evalScope();
   for (const asset of assets) {
     if (asset.kind === "memory") {
       if (!asset.content?.trim()) throw new Error(`memory asset ${asset.id} requires content`);
@@ -216,28 +255,38 @@ function average(values: number[]): number {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function main(): void {
+function printReport(label: string, report: EvaluationReport): void {
+  console.log(`\n=== ${label} ${report.fixture} (${report.totalCases} cases, ${report.criticalCases} critical) ===`);
+  console.log(`Recall@K            ${report.recallAtK.toFixed(4)}`);
+  console.log(`Precision@K         ${report.precisionAtK.toFixed(4)}`);
+  console.log(`MRR                 ${report.mrr.toFixed(4)}`);
+  console.log(`Forbidden hit rate  ${report.forbiddenHitRate.toFixed(4)}`);
+  console.log(`Avg returned chars  ${report.averageReturnedChars.toFixed(1)}`);
+  console.log(`Critical Recall@K   ${report.criticalRecall.toFixed(4)}`);
+  console.log(`Critical forbidden  ${report.criticalForbiddenHitRate.toFixed(4)}`);
+  if (report.failures.length > 0) {
+    console.log(`Failing cases:`);
+    for (const failure of report.failures) console.log(`  - ${failure.caseId}: ${failure.reason}`);
+  }
+}
+
+async function main(): Promise<void> {
   const verbose = process.argv.includes("--verbose");
+  const hybrid = process.argv.includes("--hybrid");
   const reports: EvaluationReport[] = [];
+  const hybridReports: EvaluationReport[] = [];
   for (const fixture of FIXTURES) {
     const corpus = parseFixture(readFileSync(resolve(EVAL_ROOT, fixture), "utf8"));
     if (verbose) console.log(`\n--- ${fixture} ---`);
-    reports.push(aggregateReports(fixture, corpus, evaluateCorpus(corpus, verbose)));
+    reports.push(aggregateReports(fixture, corpus, await evaluateCorpus(corpus, verbose)));
+    if (hybrid) {
+      hybridReports.push(aggregateReports(fixture, corpus, await evaluateCorpusHybrid(corpus, verbose)));
+    }
   }
 
-  for (const report of reports) {
-    console.log(`\n=== ${report.fixture} (${report.totalCases} cases, ${report.criticalCases} critical) ===`);
-    console.log(`Recall@K            ${report.recallAtK.toFixed(4)}`);
-    console.log(`Precision@K         ${report.precisionAtK.toFixed(4)}`);
-    console.log(`MRR                 ${report.mrr.toFixed(4)}`);
-    console.log(`Forbidden hit rate  ${report.forbiddenHitRate.toFixed(4)}`);
-    console.log(`Avg returned chars  ${report.averageReturnedChars.toFixed(1)}`);
-    console.log(`Critical Recall@K   ${report.criticalRecall.toFixed(4)}`);
-    console.log(`Critical forbidden  ${report.criticalForbiddenHitRate.toFixed(4)}`);
-    if (report.failures.length > 0) {
-      console.log(`Failing cases:`);
-      for (const failure of report.failures) console.log(`  - ${failure.caseId}: ${failure.reason}`);
-    }
+  for (const report of reports) printReport("lexical", report);
+  if (hybrid) {
+    for (const report of hybridReports) printReport("hybrid(mock)", report);
   }
 
   const overall: Baseline & { recallAtK: number; forbiddenHitRate: number; criticalRecall: number; criticalForbiddenHitRate: number } = {
@@ -282,10 +331,38 @@ function main(): void {
       failed = true;
     }
   }
+  if (hybrid) {
+    // 混合管线一致性门禁：Mock 零向量下逐用例失败集合必须与词法路径完全一致
+    let consistent = true;
+    for (let index = 0; index < reports.length; index += 1) {
+      const lexical = reports[index]!;
+      const hybridReport = hybridReports[index]!;
+      // 一个用例可能有多条失败记录（recall 与 forbiddenHits），
+      // 必须按"用例:原因"做多重集合对比，不能按 caseId 去重
+      const toKeys = (failures: EvaluationReport["failures"]) =>
+        failures.map((failure) => `${failure.caseId}:${failure.reason}`).sort();
+      const lexicalKeys = toKeys(lexical.failures);
+      const hybridKeys = toKeys(hybridReport.failures);
+      if (lexicalKeys.join("\n") !== hybridKeys.join("\n")) {
+        console.error(`\nFAIL: hybrid(mock) diverged from lexical in ${hybridReport.fixture}:`);
+        console.error(`  lexical: ${lexicalKeys.join(" | ")}`);
+        console.error(`  hybrid : ${hybridKeys.join(" | ")}`);
+        consistent = false;
+        failed = true;
+      }
+      if (Math.abs(hybridReport.precisionAtK - lexical.precisionAtK) > REGRESSION_TOLERANCE
+        || Math.abs(hybridReport.mrr - lexical.mrr) > REGRESSION_TOLERANCE) {
+        console.error(`\nFAIL: hybrid(mock) aggregate metrics diverged in ${hybridReport.fixture}`);
+        consistent = false;
+        failed = true;
+      }
+    }
+    if (consistent) console.log("\nhybrid(mock) pipeline matches lexical results exactly");
+  }
   if (failed) process.exit(1);
   console.log("\nPASS: all metrics within gates and baseline");
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  main();
+  await main();
 }

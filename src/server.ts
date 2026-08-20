@@ -9,6 +9,8 @@ import { InMemoryLlmMetricsRecorder } from "./llm/provider.js";
 import { createLlmProvider } from "./llm/provider-registry.js";
 import { resolveLlmConfigFromEnv } from "./llm/model-config.js";
 import type { LlmProvider } from "./llm/types.js";
+import { resolveRetrieverFromEnv } from "./retrieval/retriever.js";
+import { describeEmbeddingConfig } from "./retrieval/embedding-provider.js";
 
 const host = process.env.MEMORY_SKILLS_HOST ?? "127.0.0.1";
 const port = Number.parseInt(process.env.MEMORY_SKILLS_PORT ?? "8421", 10);
@@ -36,7 +38,31 @@ try {
   console.error(`LLM Provider 初始化失败，提案功能不可用：${error instanceof Error ? error.message : String(error)}`);
 }
 
-const server = createMemorySkillsServer({ repository, accessKey, webRoot, eventSink, ...(llmProvider !== undefined ? { llmProvider } : {}) });
+// 组装检索层：默认词法；MEMORY_SKILLS_RETRIEVAL=hybrid 时启用向量通道。
+// 初始化失败同样不阻断启动，召回自动保持词法路径
+let retrieval: ReturnType<typeof resolveRetrieverFromEnv> | undefined;
+try {
+  retrieval = resolveRetrieverFromEnv(process.env, { vectorDatabasePath: databasePath });
+  if (retrieval.embedding) {
+    // 描述对象显式投影全部字段，证明不含密钥值
+    console.log(`混合检索已启用：${JSON.stringify(describeEmbeddingConfig(retrieval.embedding.config))}`);
+  }
+} catch (error) {
+  retrieval = undefined;
+  console.error(`检索层初始化失败，保持词法检索：${error instanceof Error ? error.message : String(error)}`);
+}
+
+const server = createMemorySkillsServer({
+  repository,
+  accessKey,
+  webRoot,
+  eventSink,
+  ...(llmProvider !== undefined ? { llmProvider } : {}),
+  ...(retrieval !== undefined ? { retriever: retrieval.retriever } : {}),
+  ...(retrieval?.embedding !== undefined
+    ? { embedding: { provider: retrieval.embedding.provider, index: retrieval.embedding.index } }
+    : {}),
+});
 
 server.listen(port, host, () => {
   eventSink.emit({

@@ -107,13 +107,12 @@ export class SkillService {
   }
 
   /**
-   * Search with relevance ordering, so ContextService can rank and budget
-   * skill results the same way as memories.
+   * 带相关性排序的搜索，让 ContextService 能像处理记忆一样
+   * 对 Skill 结果做排序与预算控制。
    */
   searchRanked(query: string, scope: Scope, includeDraft = false): SkillDocument[] {
     if (!query.trim()) throw new Error("query must not be empty");
-    return this.repository.listSkills(scope)
-      .filter((skill) => skill.status === "verified" || (includeDraft && skill.status === "draft"))
+    return this.listRecallable(scope, includeDraft)
       .map((skill) => {
         const text = `${skill.name} ${skill.description} ${skill.content}`;
         return { skill, score: lexicalScore(query, text) };
@@ -121,6 +120,15 @@ export class SkillService {
       .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score)
       .map(({ skill }) => skill);
+  }
+
+  /**
+   * 作用域与状态过滤后的可召回 Skill（不打分）：
+   * 与 MemoryService.listRecallable 对齐，作为检索层的统一候选来源。
+   */
+  listRecallable(scope: Scope, includeDraft = false): SkillDocument[] {
+    return this.repository.listSkills(scope)
+      .filter((skill) => skill.status === "verified" || (includeDraft && skill.status === "draft"));
   }
 }
 

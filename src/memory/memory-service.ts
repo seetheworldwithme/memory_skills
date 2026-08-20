@@ -110,8 +110,8 @@ export class MemoryService {
   }
 
   /**
-   * Rank matching memories without applying a character budget, so callers such as
-   * ContextService can distinguish count truncation from budget truncation.
+   * 带相关性排序的召回（不应用字符预算），让 ContextService 这类调用方
+   * 能区分"按条数丢弃"和"按字符预算截断"。
    */
   recallRanked(input: {
     query: string;
@@ -123,16 +123,29 @@ export class MemoryService {
     requireText(input.query, "query");
     const maxResults = input.maxResults ?? 5;
     if (!Number.isInteger(maxResults) || maxResults <= 0) throw new Error("maxResults must be a positive integer");
+    return this.rankLexically(this.listRecallable(input.scope, input.includeDraft), input.query)
+      .slice(0, maxResults);
+  }
+
+  /**
+   * 作用域与治理过滤后的可召回资产（不打词法分、不截断）：
+   * 检索层的统一候选来源，保证任何排序策略都建立在同一治理边界之上。
+   */
+  listRecallable(scope: Scope, includeDraft = false): MemoryAsset[] {
     const now = this.now().toISOString();
-    const allowed = input.includeDraft ? new Set(["verified", "draft"]) : new Set(["verified"]);
-    return this.repository.listMemory(input.scope)
+    const allowed = includeDraft ? new Set(["verified", "draft"]) : new Set(["verified"]);
+    return this.repository.listMemory(scope)
       .filter((asset) => allowed.has(asset.governance.status))
       .filter((asset) => !asset.governance.validFrom || asset.governance.validFrom <= now)
-      .filter((asset) => !asset.governance.validUntil || asset.governance.validUntil >= now)
-      .map((asset) => ({ asset, score: lexicalScore(input.query, asset.content) * asset.governance.confidence }))
+      .filter((asset) => !asset.governance.validUntil || asset.governance.validUntil >= now);
+  }
+
+  /** 词法打分排序：分数 = lexicalScore * confidence，过滤零分，保持过滤后的枚举顺序。 */
+  private rankLexically(assets: MemoryAsset[], query: string): RecalledMemory[] {
+    return assets
+      .map((asset) => ({ asset, score: lexicalScore(query, asset.content) * asset.governance.confidence }))
       .filter(({ score: value }) => value > 0)
       .sort((a, b) => b.score - a.score)
-      .slice(0, maxResults)
       .map(({ asset, score: value }) => ({ ...asset, score: value, truncated: false }));
   }
 

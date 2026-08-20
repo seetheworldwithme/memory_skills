@@ -8,12 +8,12 @@ import { SqliteRepository } from "../src/storage/sqlite-repository.js";
 import { CONTRACT_VERSION, isContextRecallResponse } from "../src/context/contract.js";
 import { contractQuery, contractScope, seedContractAssets, type ContractEnvelope } from "./helpers/contract-fixtures.js";
 
-test("context recall returns a versioned contract envelope with match metadata and budgets", () => {
+test("context recall returns a versioned contract envelope with match metadata and budgets", async () => {
   const repository = new SqliteRepository(":memory:");
   seedContractAssets(repository);
   const context = new ContextService(new MemoryService(repository), new SkillService(repository));
 
-  const response = context.recall({ query: contractQuery, scope: contractScope });
+  const response = await context.recall({ query: contractQuery, scope: contractScope });
 
   const envelope = response as unknown as ContractEnvelope;
   assert.equal(envelope.contractVersion, CONTRACT_VERSION);
@@ -46,12 +46,12 @@ test("context recall returns a versioned contract envelope with match metadata a
   repository.close();
 });
 
-test("contract reports budget truncation through warnings and flags", () => {
+test("contract reports budget truncation through warnings and flags", async () => {
   const repository = new SqliteRepository(":memory:");
   seedContractAssets(repository);
   const context = new ContextService(new MemoryService(repository), new SkillService(repository));
 
-  const envelope = context.recall({
+  const envelope = await context.recall({
     query: contractQuery,
     scope: contractScope,
     maxMemoryChars: 4,
@@ -67,12 +67,12 @@ test("contract reports budget truncation through warnings and flags", () => {
   repository.close();
 });
 
-test("result-count budgets that drop matching assets are reported, not silent", () => {
+test("result-count budgets that drop matching assets are reported, not silent", async () => {
   const repository = new SqliteRepository(":memory:");
   seedContractAssets(repository);
   const context = new ContextService(new MemoryService(repository), new SkillService(repository));
 
-  const envelope = context.recall({
+  const envelope = await context.recall({
     query: contractQuery,
     scope: contractScope,
     maxMemoryResults: 5,
@@ -81,7 +81,7 @@ test("result-count budgets that drop matching assets are reported, not silent", 
   assert.equal(envelope.truncated, false);
   assert.deepEqual(envelope.warnings, []);
 
-  const squeezed = context.recall({
+  const squeezed = await context.recall({
     query: contractQuery,
     scope: contractScope,
     maxSkillResults: 1,
@@ -92,24 +92,24 @@ test("result-count budgets that drop matching assets are reported, not silent", 
   repository.close();
 });
 
-test("match metadata never leaks internal SQL or storage detail", () => {
+test("match metadata never leaks internal SQL or storage detail", async () => {
   const repository = new SqliteRepository(":memory:");
   seedContractAssets(repository);
   const context = new ContextService(new MemoryService(repository), new SkillService(repository));
 
-  const envelope = context.recall({ query: contractQuery, scope: contractScope }) as unknown as ContractEnvelope;
+  const envelope = await context.recall({ query: contractQuery, scope: contractScope }) as unknown as ContractEnvelope;
   const serialized = JSON.stringify(envelope);
   assert.ok(!/SELECT|INSERT|sqlite|governance_json/i.test(serialized));
 
   repository.close();
 });
 
-test("empty results keep the same envelope shape", () => {
+test("empty results keep the same envelope shape", async () => {
   const repository = new SqliteRepository(":memory:");
   seedContractAssets(repository);
   const context = new ContextService(new MemoryService(repository), new SkillService(repository));
 
-  const envelope = context.recall({
+  const envelope = await context.recall({
     query: "quantum flux capacitor maintenance",
     scope: contractScope,
   }) as unknown as ContractEnvelope;
@@ -121,13 +121,13 @@ test("empty results keep the same envelope shape", () => {
   repository.close();
 });
 
-test("requestId is unique per recall call", () => {
+test("requestId is unique per recall call", async () => {
   const repository = new SqliteRepository(":memory:");
   seedContractAssets(repository);
   const context = new ContextService(new MemoryService(repository), new SkillService(repository));
 
-  const first = context.recall({ query: contractQuery, scope: contractScope }) as unknown as ContractEnvelope;
-  const second = context.recall({ query: contractQuery, scope: contractScope }) as unknown as ContractEnvelope;
+  const first = await context.recall({ query: contractQuery, scope: contractScope }) as unknown as ContractEnvelope;
+  const second = await context.recall({ query: contractQuery, scope: contractScope }) as unknown as ContractEnvelope;
   assert.notEqual(first.requestId, second.requestId);
 
   repository.close();

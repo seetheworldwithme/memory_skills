@@ -14,6 +14,9 @@ import { ProposalService } from "../extraction/proposal-service.js";
 import type { ProposalJobInput } from "../extraction/interfaces.js";
 import type { LlmProvider } from "../llm/types.js";
 import type { EventSink } from "../observability/event-sink.js";
+import { EmbeddingSyncService } from "../retrieval/embedding-sync.js";
+import type { EmbeddingProvider, Retriever, VectorIndex } from "../retrieval/types.js";
+import type { Scope } from "../governance/types.js";
 
 export function createMemorySkillsServer(options: {
   repository: SqliteRepository;
@@ -22,20 +25,31 @@ export function createMemorySkillsServer(options: {
   eventSink?: EventSink;
   /** 模型 Provider：未注入时提案 API 返回 503，其余能力不受影响。 */
   llmProvider?: LlmProvider;
+  /** 检索器：默认词法；注入 HybridRetriever 后 /v1/context/recall 走混合排序。 */
+  retriever?: Retriever;
+  /** 向量同步组件：注入后开放 /v1/retrieval/sync，缺省时该端点返回 503。 */
+  embedding?: { provider: EmbeddingProvider; index: VectorIndex; batchSize?: number };
 }): Server {
   if (!options.accessKey.trim()) throw new Error("accessKey must not be empty");
   const memory = new MemoryService(options.repository);
   const skills = new SkillService(options.repository);
   const context = new ContextService(memory, skills, undefined, {
     ...(options.eventSink === undefined ? {} : { eventSink: options.eventSink }),
+  }, {
+    ...(options.retriever === undefined ? {} : { retriever: options.retriever }),
   });
   const proposals = options.llmProvider
     ? new ProposalService({ memory, skills, repository: options.repository, provider: options.llmProvider })
     : undefined;
+  const embeddingSync = options.embedding
+    ? new EmbeddingSyncService(memory, skills, options.embedding.provider, options.embedding.index, {
+      ...(options.embedding.batchSize === undefined ? {} : { batchSize: options.embedding.batchSize }),
+    })
+    : undefined;
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, memory, skills, context, proposals, options.repository, options.accessKey, options.webRoot);
+      await route(request, response, memory, skills, context, proposals, embeddingSync, options.repository, options.accessKey, options.webRoot);
     } catch (error) {
       const status = error instanceof DomainError
         ? error.status
@@ -63,6 +77,7 @@ async function route(
   skills: SkillService,
   context: ContextService,
   proposals: ProposalService | undefined,
+  embeddingSync: EmbeddingSyncService | undefined,
   repository: SqliteRepository,
   accessKey: string,
   webRoot?: string,
@@ -170,7 +185,25 @@ async function route(
   }
 
   if (method === "POST" && url.pathname === "/v1/context/recall") {
-    send(response, 200, context.recall(await readJson(request) as Parameters<ContextService["recall"]>[0]));
+    send(response, 200, await context.recall(await readJson(request) as Parameters<ContextService["recall"]>[0]));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/retrieval/sync") {
+    // 人工触发的向量索引同步：只写入 embedding 元数据，不改动任何治理资产
+    if (!embeddingSync) {
+      send(response, 503, { error: "EMBEDDING_CONFIG_ERROR", message: "Embedding Provider 未配置，向量同步不可用" });
+      return;
+    }
+    const body = await readJson(request) as { scope: Scope; includeDraft?: boolean };
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    send(response, 200, await embeddingSync.sync({
+      scope: body.scope,
+      ...(body.includeDraft === undefined ? {} : { includeDraft: body.includeDraft }),
+    }));
     return;
   }
 

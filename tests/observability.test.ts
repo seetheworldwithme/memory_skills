@@ -64,7 +64,7 @@ function seed(repository: SqliteRepository): void {
   skills.transition(skill.id, scope, "verified");
 }
 
-test("召回成功事件携带计数、预算与策略，且不包含资产正文与查询原文", () => {
+test("召回成功事件携带计数、预算与策略，且不包含资产正文与查询原文", async () => {
   const repository = new SqliteRepository(":memory:");
   seed(repository);
   const sink = new RecordingSink();
@@ -73,7 +73,7 @@ test("召回成功事件携带计数、预算与策略，且不包含资产正�
     now: () => 0,
   });
 
-  const response = context.recall({
+  const response = await context.recall({
     query: `用户偏好说明 ${secretQueryMarker}`,
     scope,
     maxMemoryResults: 1,
@@ -93,6 +93,7 @@ test("召回成功事件携带计数、预算与策略，且不包含资产正�
   assert.ok(event.durationMs >= 0);
   assert.equal(event.includeDraft, false);
   assert.deepEqual(event.matchStrategies, ["lexical"]);
+  assert.equal(event.retrievalStrategy, "lexical");
   assert.deepEqual(event.scope, scope);
   assert.ok(event.warningCodes.includes("MEMORY_RESULTS_DROPPED"));
 
@@ -102,7 +103,7 @@ test("召回成功事件携带计数、预算与策略，且不包含资产正�
   assert.ok(!line.includes(secretQueryMarker));
 });
 
-test("召回截断时事件记录 truncated 与预算告警码", () => {
+test("召回截断时事件记录 truncated 与预算告警码", async () => {
   const repository = new SqliteRepository(":memory:");
   seed(repository);
   const sink = new RecordingSink();
@@ -110,7 +111,7 @@ test("召回截断时事件记录 truncated 与预算告警码", () => {
     eventSink: sink,
   });
 
-  context.recall({
+  await context.recall({
     query: "用户偏好说明",
     scope,
     maxMemoryChars: 10,
@@ -125,7 +126,7 @@ test("召回截断时事件记录 truncated 与预算告警码", () => {
   assert.ok(event.usedMemoryChars <= 10);
 });
 
-test("无效预算参数触发失败事件，错误码稳定且不携带正文", () => {
+test("无效预算参数触发失败事件，错误码稳定且不携带正文", async () => {
   const repository = new SqliteRepository(":memory:");
   seed(repository);
   const sink = new RecordingSink();
@@ -133,7 +134,7 @@ test("无效预算参数触发失败事件，错误码稳定且不携带正文",
     eventSink: sink,
   });
 
-  assert.throws(() => context.recall({
+  await assert.rejects(context.recall({
     query: `用户偏好说明 ${secretQueryMarker}`,
     scope,
     maxMemoryResults: 0,

@@ -25,9 +25,9 @@
 ## 开发路线与当前状态
 
 - 完整路线图与任务定义见 `docs/plans/2026-08-20-memory-skills-product-architecture-development-plan.md`，MCP 契约见 `docs/integrations/mcp-contract.md`。
-- 已完成：Sprint 1（版本化上下文契约 + 离线评测基线）、Sprint 2（诊断与审计事件 + MCP 工具目录抽取）、Sprint 4（供应商无关 LLM Provider + OpenAI 兼容 Provider 与契约测试，见 `docs/model-providers.md`）、Sprint 5（Task 9 Evidence→Draft 提案流水线：人工触发 `POST /v1/proposals/{memory,skill}/run`，模型只产 Draft，Web 可对照证据原文审核）。
+- 已完成：Sprint 1（版本化上下文契约 + 离线评测基线）、Sprint 2（诊断与审计事件 + MCP 工具目录抽取）、Sprint 4（供应商无关 LLM Provider + OpenAI 兼容 Provider 与契约测试，见 `docs/model-providers.md`）、Sprint 5（Task 9 Evidence→Draft 提案流水线：人工触发 `POST /v1/proposals/{memory,skill}/run`，模型只产 Draft，Web 可对照证据原文审核）、Task 10 混合检索代码层（供应商无关 EmbeddingProvider + SQLite VectorIndex + 词法/向量确定性融合，`ContextService.recall` 已异步化；默认仍为 lexical，`MEMORY_SKILLS_RETRIEVAL=hybrid` 开启，向量同步走 `POST /v1/retrieval/sync`，见 `docs/retrieval.md`；离线评测已证明混合管线对词法零回归，真实模型的语义增益需 smoke 评测达标后才切默认）、SessionEnd 半自动捕获 hook（`scripts/session-end-capture.mjs`，只到 Evidence 层，审核闸门保留，挂载方式见 README）。
 - 待做 Sprint 3：Task 5 多宿主接入（Claude/Codex/OpenCode 复用同一 MCP 构建产物，`.codex/config.toml.example`、`opencode.json.example`、smoke 脚本为本任务交付物）；Task 6 Pi 能力探测与适配决策。
-- 之后按评测结果决定是否进入混合检索（Task 10-12），而不是按时间强行引入。
+- 混合检索后续：用真实 Embedding 模型跑 smoke 评测，对比语义改写用例（`evals/fixtures` 的 zh-057~059 / en-023，词法零命中）的召回增益；指标显著提升且禁止命中不退化后才把默认切到 hybrid。之后按评测结果决定 Task 11/12（Rewrite/Reranker、显式反馈），不按时间强行引入。
 - 每个阶段以契约测试和离线评测为发布门槛；先评测，后换算法。
 
 ## 开发规范

@@ -3,8 +3,15 @@ import { performance } from "node:perf_hooks";
 
 import type { MemoryService } from "../memory/memory-service.js";
 import type { SkillService } from "../skills/skill-service.js";
-import { lexicalScore, matchedQueryTerms } from "../retrieval/text-match.js";
 import type { EventSink } from "../observability/event-sink.js";
+import { LexicalRetriever } from "../retrieval/lexical-retriever.js";
+import {
+  memorySearchText,
+  skillSearchText,
+  type RetrievableDocument,
+  type Retriever,
+  type ScoredCandidate,
+} from "../retrieval/types.js";
 import {
   EVENT_SCHEMA_VERSION,
   errorCodeFor,
@@ -28,25 +35,40 @@ export interface ContextObservability {
   now?: () => number;
 }
 
+/** 检索注入项：默认词法；混合检索通过注入 HybridRetriever 启用。 */
+export interface ContextRetrievalOptions {
+  retriever?: Retriever;
+}
+
 export class ContextService {
   private readonly eventSink: EventSink | undefined;
   private readonly now: () => number;
+  private readonly retriever: Retriever;
+  private readonly newRequestId: () => string;
 
   constructor(
     private readonly memory: MemoryService,
     private readonly skills: SkillService,
-    private readonly newRequestId: () => string = randomUUID,
+    newRequestId: () => string = randomUUID,
     observability: ContextObservability = {},
+    retrieval: ContextRetrievalOptions = {},
   ) {
     this.eventSink = observability.eventSink;
     this.now = observability.now ?? (() => performance.now());
+    this.retriever = retrieval.retriever ?? new LexicalRetriever();
+    this.newRequestId = newRequestId;
   }
 
-  recall(input: ContextRecallInput): ContextRecallResponse {
+  /**
+   * 召回是异步接口：混合检索的查询向量需要一次 Embedding 网络调用；
+   * 词法路径同样走异步签名，保证评测与生产行为一致。
+   * 向量通道故障时由 Retriever 降级为词法，召回本身不会失败。
+   */
+  async recall(input: ContextRecallInput): Promise<ContextRecallResponse> {
     const requestId = this.newRequestId();
     const startedAt = this.now();
     try {
-      const { response, memoryCandidates, skillCandidates } = this.recallInternal(input, requestId);
+      const { response, memoryCandidates, skillCandidates } = await this.recallInternal(input, requestId);
       this.emitCompleted(input, response, memoryCandidates, skillCandidates, startedAt);
       return response;
     } catch (error) {
@@ -56,23 +78,35 @@ export class ContextService {
   }
 
   /** 候选计数随响应一起返回，供诊断事件区分"候选数"和"最终返回数"。 */
-  private recallInternal(input: ContextRecallInput, requestId: string): {
+  private async recallInternal(input: ContextRecallInput, requestId: string): Promise<{
     response: ContextRecallResponse;
     memoryCandidates: number;
     skillCandidates: number;
-  } {
+  }> {
     const maxMemoryResults = positiveInteger(input.maxMemoryResults ?? 5, "maxMemoryResults");
     const maxMemoryChars = positiveInteger(input.maxMemoryChars ?? 4_000, "maxMemoryChars");
     const maxSkillResults = positiveInteger(input.maxSkillResults ?? 3, "maxSkillResults");
     const maxSkillChars = positiveInteger(input.maxSkillChars ?? 8_000, "maxSkillChars");
 
-    const rankedMemories = this.memory.recallRanked({
-      query: input.query,
-      scope: input.scope,
-      ...(input.includeDraft === undefined ? {} : { includeDraft: input.includeDraft }),
-      maxResults: maxMemoryResults * RESULT_HEADROOM,
-      maxTotalChars: Number.MAX_SAFE_INTEGER,
-    });
+    // 候选来自作用域与治理过滤后的可召回资产，排序交给 Retriever：
+    // ContextService 不感知词法/向量实现，也不感知厂商与存储
+    const memoryAssets = this.memory.listRecallable(input.scope, input.includeDraft === true);
+    const memoryRank = await this.retriever.rank(
+      input.query,
+      memoryAssets.map((asset): RetrievableDocument => ({
+        kind: "memory",
+        id: asset.id,
+        text: memorySearchText(asset),
+        weight: asset.governance.confidence,
+      })),
+      { scope: input.scope, kind: "memory", limit: maxMemoryResults * RESULT_HEADROOM },
+    );
+    const memoryById = new Map(memoryAssets.map((asset) => [asset.id, asset]));
+    const rankedMemories = memoryRank.candidates
+      .map((candidate) => ({ asset: memoryById.get(candidate.id), candidate }))
+      .filter((entry): entry is { asset: NonNullable<typeof entry.asset>; candidate: ScoredCandidate } =>
+        entry.asset !== undefined);
+
     const warnings: ContractWarning[] = [];
     const droppedMemories = rankedMemories.length - Math.min(rankedMemories.length, maxMemoryResults);
     const topMemories = rankedMemories.slice(0, maxMemoryResults);
@@ -80,31 +114,54 @@ export class ContextService {
     let usedMemoryChars = 0;
     let memoryTruncated = false;
     const memories: ContractedMemory[] = [];
-    for (const memory of topMemories) {
+    for (const { asset, candidate } of topMemories) {
       if (usedMemoryChars >= maxMemoryChars) break;
       const room = maxMemoryChars - usedMemoryChars;
-      const content = memory.content.length > room ? memory.content.slice(0, room) : memory.content;
-      const truncated = content.length < memory.content.length;
+      const content = asset.content.length > room ? asset.content.slice(0, room) : asset.content;
+      const truncated = content.length < asset.content.length;
       memoryTruncated ||= truncated;
       usedMemoryChars += content.length;
-      memories.push({ ...memory, content, truncated, match: lexicalMatch(input.query, memory.content, memory.score) });
+      memories.push({ ...asset, content, truncated, score: candidate.score, match: toMatchMetadata(candidate) });
     }
 
-    const matchedSkills = this.skills.searchRanked(input.query, input.scope, input.includeDraft);
-    const droppedSkills = matchedSkills.length - Math.min(matchedSkills.length, maxSkillResults);
-    const topSkills = matchedSkills.slice(0, maxSkillResults);
+    const skillAssets = this.skills.listRecallable(input.scope, input.includeDraft === true);
+    const skillRank = await this.retriever.rank(
+      input.query,
+      skillAssets.map((skill): RetrievableDocument => ({
+        kind: "skill",
+        id: skill.id,
+        text: skillSearchText(skill),
+        weight: 1,
+      })),
+      // 沿用既有语义：Skill 不在检索层截断，由预算层统一裁剪
+      { scope: input.scope, kind: "skill" },
+    );
+    const skillById = new Map(skillAssets.map((skill) => [skill.id, skill]));
+    const rankedSkills = skillRank.candidates
+      .map((candidate) => ({ skill: skillById.get(candidate.id), candidate }))
+      .filter((entry): entry is { skill: NonNullable<typeof entry.skill>; candidate: ScoredCandidate } =>
+        entry.skill !== undefined);
+
+    if (memoryRank.vectorDegraded || skillRank.vectorDegraded) {
+      warnings.push({
+        code: "RETRIEVAL_DEGRADED_LEXICAL",
+        message: "vector retrieval failed; results degraded to lexical ranking",
+      });
+    }
+    const droppedSkills = rankedSkills.length - Math.min(rankedSkills.length, maxSkillResults);
+    const topSkills = rankedSkills.slice(0, maxSkillResults);
 
     let usedSkillChars = 0;
     let skillTruncated = false;
     const skills: ContractedSkill[] = [];
-    for (const skill of topSkills) {
+    for (const { skill, candidate } of topSkills) {
       if (usedSkillChars >= maxSkillChars) break;
       const room = maxSkillChars - usedSkillChars;
       const content = skill.content.length > room ? skill.content.slice(0, room) : skill.content;
       const truncated = content.length < skill.content.length;
       skillTruncated ||= truncated;
       usedSkillChars += content.length;
-      skills.push({ ...skill, content, truncated, match: lexicalMatch(input.query, skillSearchText(skill), lexicalScore(input.query, skillSearchText(skill))) });
+      skills.push({ ...skill, content, truncated, match: toMatchMetadata(candidate) });
     }
 
     if (memoryTruncated) {
@@ -142,7 +199,7 @@ export class ContextService {
         warnings,
       },
       memoryCandidates: rankedMemories.length,
-      skillCandidates: matchedSkills.length,
+      skillCandidates: rankedSkills.length,
     };
   }
 
@@ -164,6 +221,7 @@ export class ContextService {
       timestamp: new Date().toISOString(),
       requestId: response.requestId,
       contractVersion: response.contractVersion,
+      retrievalStrategy: this.retriever.strategy,
       scope: input.scope,
       durationMs: roundDuration(this.now() - startedAt),
       queryChars: input.query.length,
@@ -204,21 +262,17 @@ export class ContextService {
 }
 
 /**
- * MemoryService.recallRanked 在应用字符预算前就按 maxResults 截断，
+ * MemoryService 侧候选在应用字符预算前就按 limit 截断，
  * 因此这里多取一倍余量，用于区分"按条数丢弃"和"按字符预算截断"。
  */
 const RESULT_HEADROOM = 2;
 
-function lexicalMatch(query: string, content: string, score: number): MatchMetadata {
+function toMatchMetadata(candidate: ScoredCandidate): MatchMetadata {
   return {
-    strategy: "lexical",
-    score: Number(score.toFixed(4)),
-    matchedTerms: matchedQueryTerms(query, content),
+    strategy: candidate.strategy,
+    score: Number(candidate.score.toFixed(4)),
+    matchedTerms: candidate.matchedTerms,
   };
-}
-
-function skillSearchText(skill: { name: string; description: string; content: string }): string {
-  return `${skill.name} ${skill.description} ${skill.content}`;
 }
 
 function positiveInteger(value: number, field: string): number {
