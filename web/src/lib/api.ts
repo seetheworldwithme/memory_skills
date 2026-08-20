@@ -50,6 +50,9 @@ export interface ProposalRunReport<TCreated> {
   latencyMs: number;
 }
 
+/** 显式反馈四分类：与后端 FEEDBACK_KINDS 对应。 */
+export type FeedbackKind = "useful" | "irrelevant" | "incorrect" | "outdated";
+
 interface ApiErrorBody { error?: string; message?: string }
 
 export class ApiError extends Error {
@@ -134,6 +137,11 @@ export class ApiClient {
 
   async transitionSkill(id: string, target: Status): Promise<void> {
     await this.request(`/v1/skills/${encodeURIComponent(id)}/status`, { scope: LOCAL_SCOPE, target });
+  }
+
+  /** 提交显式反馈：只采集人工判断，不会自动改写资产。 */
+  async submitFeedback(input: { assetKind: "memory" | "skill"; assetId: string; kind: FeedbackKind; comment?: string }): Promise<void> {
+    await this.request("/v1/feedback", { ...input, scope: LOCAL_SCOPE });
   }
 
   private async request<T = unknown>(path: string, body: unknown): Promise<T> {

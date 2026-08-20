@@ -17,7 +17,7 @@ ContextService
 
 - **ContextService 不感知厂商与数据库**：换 Embedding 供应商或向量库只替换 `EmbeddingProvider` / `VectorIndex` 实现；
 - **治理交集优先**：候选列表由 `MemoryService.listRecallable` / `SkillService.listRecallable` 生成（已完成作用域、状态、有效期过滤），向量命中只在与该列表求交后参与排序——向量通道只能改变已过滤候选的排序与入选，永远不能把未通过治理过滤的资产带入结果；
-- **读路径不写库**：召回只读向量索引；写入只发生在人工触发的 `POST /v1/retrieval/sync`。
+- **读路径不写库**：召回只读向量索引；写入发生在人工触发的 `POST /v1/retrieval/sync` 与治理状态转换后的自动同步（见下文）。
 
 ## 融合算法（确定性）
 
@@ -57,15 +57,27 @@ ContextService
 
 ## 同步流程
 
+### 状态转换后自动同步（默认行为）
+
+hybrid 模式下，记忆/Skill 的治理状态转换（Verify、Reject、归档等）成功后，服务端自动对该资产所在作用域跑一次增量向量同步。解决的问题：新 Verify 的资产若要等人工同步才进向量索引，在此之前的召回只走词法通道，语义改写类查询会漏掉它。
+
+- 同步是**索引维护**，不是提案也不是发布，仍在治理边界内；模型永远不经此路径产生 Verified 资产；
+- 增量语义与手动同步一致：内容指纹未变跳过，离开可召回集（rejected/archived/deprecated）的向量行清理，开销只与实际变更的资产数成正比；
+- **失败只记事件，不影响治理操作本身**：Embedding 服务故障时 Verify/Reject 照常成功，审计事件 `retrieval.auto_sync.failed`（只含错误码与错误名）留待排查，恢复后的下一次转换或手动同步会补齐索引；
+- 成功同样记 `retrieval.auto_sync.completed` 事件（含 embedded/removed 计数）；
+- 词法模式（未配置 Embedding）不触发同步。
+
+### 手动全量同步
+
 ```bash
-# 服务以 hybrid 模式运行后，按作用域手动触发
+# 初始化索引、更换 Embedding 模型后补齐、或自动同步失败后补救时手动触发
 curl -X POST "$MEMORY_SKILLS_URL/v1/retrieval/sync" \
   -H "authorization: Bearer $MEMORY_SKILLS_ACCESS_KEY" \
   -H "content-type: application/json" \
   -d '{"scope":{"userId":"local-admin","teamId":"local","agentId":"default"}}'
 ```
 
-增量策略：内容指纹（SHA-256 前 32 位）未变跳过；已归档/删除资产的向量行清理。Verify/Reject 新资产后重跑一次同步即可进入向量索引。
+增量策略：内容指纹（SHA-256 前 32 位）未变跳过；已归档/删除资产的向量行清理。`includeDraft: true` 可把 Draft 资产也嵌入索引（配合 `includeDraft` 召回调试用；自动同步永远只覆盖 Verified 资产）。
 
 ## 启用门槛与真实模型评测结论（2026-08-20）
 

@@ -23,9 +23,9 @@ Claude Code 项目说明。本仓库既开发 memory-skills 服务，也通过�
 ## 开发路线与当前状态
 
 - 完整路线图与任务定义见 `docs/plans/2026-08-20-memory-skills-product-architecture-development-plan.md`，MCP 契约见 `docs/integrations/mcp-contract.md`。
-- 已完成：Sprint 1（版本化上下文契约 + 离线评测基线）、Sprint 2（诊断与审计事件 + MCP 工具目录抽取）、Sprint 4（供应商无关 LLM Provider + OpenAI 兼容 Provider 与契约测试，见 `docs/model-providers.md`）、Sprint 5（Task 9 Evidence→Draft 提案流水线：人工触发 `POST /v1/proposals/{memory,skill}/run`，模型只产 Draft，Web 可对照证据原文审核）、Task 10 混合检索代码层（供应商无关 EmbeddingProvider + SQLite VectorIndex + 词法/向量确定性融合，`ContextService.recall` 已异步化；默认仍为 lexical，`MEMORY_SKILLS_RETRIEVAL=hybrid` 开启，向量同步走 `POST /v1/retrieval/sync`，见 `docs/retrieval.md`；离线评测已证明混合管线对词法零回归，真实模型的语义增益需 smoke 评测达标后才切默认）、SessionEnd 半自动捕获 hook（`scripts/session-end-capture.mjs`，只到 Evidence 层，审核闸门保留，挂载方式见 README）。
+- 已完成：Sprint 1（版本化上下文契约 + 离线评测基线）、Sprint 2（诊断与审计事件 + MCP 工具目录抽取）、Sprint 4（供应商无关 LLM Provider + OpenAI 兼容 Provider 与契约测试，见 `docs/model-providers.md`）、Sprint 5（Task 9 Evidence→Draft 提案流水线：人工触发 `POST /v1/proposals/{memory,skill}/run`，模型只产 Draft，Web 可对照证据原文审核）、Task 10 混合检索（供应商无关 EmbeddingProvider + SQLite VectorIndex + 词法/向量确定性融合，`ContextService.recall` 已异步化；`MEMORY_SKILLS_RETRIEVAL=hybrid` 开启；真实模型 smoke 评测达标后已在 8421 投产 hybrid：text-embedding-3-large + minCos 0.5，见 `docs/retrieval.md`）、SessionEnd 半自动捕获 hook（`scripts/session-end-capture.mjs`，只到 Evidence 层，审核闸门保留，挂载方式见 README）、Task 12 显式反馈（`POST /v1/feedback` 与 `/v1/feedback/list`：有用/无关/错误/过期四类，关联召回 requestId 与资产版本；只用于评测与治理建议，不自动改写资产；Web 资产详情页有反馈条）、治理状态转换后自动向量同步（Verify/Reject/归档成功后自动增量同步该资产作用域，hybrid 下新 Verify 资产即时进入向量通道；失败只记 `retrieval.auto_sync.failed` 事件不影响治理操作，手动 `POST /v1/retrieval/sync` 保留用于初始化与补救）。
 - 待做 Sprint 3：Task 5 多宿主接入（Claude/Codex/OpenCode 复用同一 MCP 构建产物与 `.mcp.json`、smoke 脚本）；Task 6 Pi 能力探测与适配决策。
-- 混合检索后续：用真实 Embedding 模型跑 smoke 评测，对比语义改写用例（`evals/fixtures` 的 zh-057~059 / en-023，词法零命中）的召回增益；指标显著提升且禁止命中不退化后才把默认切到 hybrid。之后按评测结果决定 Task 11/12（Rewrite/Reranker、显式反馈），不按时间强行引入。
+- 混合检索现状：真实模型 smoke 评测达标并已在 8421 投产（large + minCos 0.5，语义改写用例 zh-057~059 全中、禁止命中零退化）。Task 11（可选 Query Rewrite / Reranker）仍按评测结果决定是否引入，不按时间强行引入；换任何新 Embedding 模型先重跑 smoke 扫描再调阈值。反馈闭环（Task 12）已上线，接下来的运营动作：定期把 feedback 表中 incorrect/outdated 的真实失败样本脱敏后加入离线评测集。
 - 每个阶段以契约测试和离线评测为发布门槛；先评测，后换算法。
 
 ## 开发规范

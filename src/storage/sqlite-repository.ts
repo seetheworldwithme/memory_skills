@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { GovernedStatus } from "../governance/lifecycle.js";
 import type { GovernanceMetadata, Scope, SourceReference } from "../governance/types.js";
+import type { FeedbackRecord } from "../feedback/types.js";
 import type { Evidence, MemoryAsset, MemoryLayer } from "../memory/types.js";
 import type { SkillDocument } from "../skills/types.js";
 
@@ -82,6 +83,26 @@ export class SqliteRepository {
         evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
         PRIMARY KEY(skill_id, evidence_id)
       );
+
+      -- 显式反馈表：刻意不加指向资产表的外键——资产被归档或删除后
+      -- 反馈记录仍需保留，作为评测样本与治理建议的历史依据
+      CREATE TABLE IF NOT EXISTS feedback (
+        id TEXT PRIMARY KEY,
+        asset_kind TEXT NOT NULL CHECK(asset_kind IN ('memory','skill')),
+        asset_id TEXT NOT NULL,
+        asset_version TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('useful','irrelevant','incorrect','outdated')),
+        user_id TEXT NOT NULL,
+        team_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        session_id TEXT,
+        request_id TEXT,
+        comment TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS feedback_scope_time
+      ON feedback(user_id, team_id, agent_id, IFNULL(session_id, ''), created_at DESC);
     `);
   }
 
@@ -330,6 +351,40 @@ export class SqliteRepository {
     `).all(scope.userId, scope.teamId, scope.agentId, scope.sessionId ?? null) as DbRow[];
     return rows.map(rowToSkill);
   }
+
+  /** 落库一条显式反馈：ID 冲突时由主键约束抛错，由调用方映射为 409。 */
+  insertFeedback(record: FeedbackRecord): FeedbackRecord {
+    this.db.prepare(`
+      INSERT INTO feedback
+      (id,asset_kind,asset_id,asset_version,kind,user_id,team_id,agent_id,session_id,request_id,comment,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      record.id,
+      record.assetKind,
+      record.assetId,
+      record.assetVersion,
+      record.kind,
+      record.scope.userId,
+      record.scope.teamId,
+      record.scope.agentId,
+      record.scope.sessionId ?? null,
+      record.requestId ?? null,
+      record.comment ?? null,
+      record.createdAt,
+    );
+    return record;
+  }
+
+  /** 按作用域列出反馈，时间倒序（最新在前）。 */
+  listFeedback(scope: Scope): FeedbackRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM feedback
+      WHERE user_id = ? AND team_id = ? AND agent_id = ?
+      AND session_id IS ?
+      ORDER BY created_at DESC, id DESC
+    `).all(scope.userId, scope.teamId, scope.agentId, scope.sessionId ?? null) as DbRow[];
+    return rows.map(rowToFeedback);
+  }
 }
 
 function rowToEvidence(row: DbRow): Evidence {
@@ -365,6 +420,20 @@ function rowToSkill(row: DbRow): SkillDocument {
     sources: JSON.parse(String(row.sources_json)) as SourceReference[],
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function rowToFeedback(row: DbRow): FeedbackRecord {
+  return {
+    id: String(row.id),
+    assetKind: String(row.asset_kind) as FeedbackRecord["assetKind"],
+    assetId: String(row.asset_id),
+    assetVersion: String(row.asset_version),
+    kind: String(row.kind) as FeedbackRecord["kind"],
+    scope: rowToScope(row),
+    ...(row.request_id == null ? {} : { requestId: String(row.request_id) }),
+    ...(row.comment == null ? {} : { comment: String(row.comment) }),
+    createdAt: String(row.created_at),
   };
 }
 

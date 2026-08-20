@@ -62,6 +62,9 @@ POST /v1/memories/:id/status
 { "target": "verified" }
 ```
 
+hybrid 模式下，状态转换成功后服务端会自动对该资产作用域做一次增量向量同步
+（失败只记审计事件，不影响转换结果）；Skill 的状态端点行为相同。
+
 ## Recall
 
 ```http
@@ -186,6 +189,44 @@ POST /v1/evidence/get
 
 返回 `{ "items": [Evidence] }`；不在该作用域内的 ID 会被静默过滤。
 
+## Submit feedback（显式反馈）
+
+```http
+POST /v1/feedback
+```
+
+```json
+{
+  "assetKind": "memory",
+  "assetId": "mem-1",
+  "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" },
+  "kind": "incorrect",
+  "requestId": "0f6b2c1e-…",
+  "comment": "与用户最新说法矛盾"
+}
+```
+
+四类反馈：`useful`（有用）/ `irrelevant`（无关）/ `incorrect`（错误）/
+`outdated`（过期）。服务端提交时解析资产当前版本一并落库（Skill 为版本号，
+Memory 为 `governance.updatedAt`），`requestId` 关联 `/v1/context/recall`
+响应中的召回请求，`comment` 可选。约束：
+
+- 反馈只用于离线评测与治理建议，**不自动改写**资产内容或状态；
+- 资产必须存在于该作用域内，否则 `404 NOT_FOUND`；
+- 资产后续被归档或删除后反馈记录仍保留（评测样本与治理建议的历史依据）。
+
+## List feedback
+
+```http
+POST /v1/feedback/list
+```
+
+```json
+{ "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" } }
+```
+
+返回 `{ "items": [FeedbackRecord] }`，按创建时间倒序，仅含该作用域内的反馈。
+
 ## Sync vector index（人工触发的向量索引同步）
 
 ```http
@@ -199,6 +240,8 @@ POST /v1/retrieval/sync
 }
 ```
 
+治理状态转换（Verify/Reject/归档等）成功后服务端已自动增量同步该资产作用域，
+本端点保留用于初始化索引、更换 Embedding 模型后补齐、或自动同步失败后的补救。
 仅当服务端以 `MEMORY_SKILLS_RETRIEVAL=hybrid` 启动并成功装配 Embedding
 Provider 时可用，否则返回 `503 EMBEDDING_CONFIG_ERROR`。同步只把该作用域内
 可召回（已通过治理过滤）资产的最新正文写入向量索引：

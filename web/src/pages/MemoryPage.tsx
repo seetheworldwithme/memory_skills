@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { StatusBadge } from "../components/StatusBadge";
 import { EvidenceBlock } from "../components/EvidenceBlock";
+import { FeedbackBar } from "../components/FeedbackBar";
 import type { ApiClient, MemoryAsset } from "../lib/api";
 
 export function MemoryPage({ api }: { api: ApiClient }) {
@@ -86,7 +87,7 @@ export function MemoryPage({ api }: { api: ApiClient }) {
 }
 
 function MemoryDetail({ item, api, onTransition }: { item: MemoryAsset; api: ApiClient; onTransition: (target: "verified" | "rejected" | "archived") => Promise<void> }) {
-  return <div className="detail-content"><div className="detail-title"><div><span className="mono-id">{item.id}</span><h2>{item.content}</h2></div><StatusBadge status={item.governance.status} /></div><dl className="facts"><div><dt>层级</dt><dd>{item.layer.toUpperCase()}</dd></div><div><dt>可信度</dt><dd>{Math.round(item.governance.confidence * 100)}%</dd></div><div><dt>敏感度</dt><dd>{item.governance.sensitivity}</dd></div><div><dt>更新时间</dt><dd>{formatDate(item.governance.updatedAt)}</dd></div></dl><div className="note"><span>沉淀理由</span><p>{item.governance.createdReason}</p></div><div className="note"><span>来源证据（审核时对照原文）</span><EvidenceBlock api={api} evidenceIds={item.sources.map((source) => source.evidenceId)} /></div><div className="detail-actions">{item.governance.status === "draft" && <><button className="primary" onClick={() => void onTransition("verified")}><Check size={16} />验证通过</button><button className="danger" onClick={() => void onTransition("rejected")}><X size={16} />拒绝</button></>} {(item.governance.status === "verified" || item.governance.status === "deprecated") && <button className="secondary" onClick={() => void onTransition("archived")}>归档</button>}</div></div>;
+  return <div className="detail-content"><div className="detail-title"><div><span className="mono-id">{item.id}</span><h2>{item.content}</h2></div><StatusBadge status={item.governance.status} /></div><dl className="facts"><div><dt>层级</dt><dd>{item.layer.toUpperCase()}</dd></div><div><dt>可信度</dt><dd>{Math.round(item.governance.confidence * 100)}%</dd></div><div><dt>敏感度</dt><dd>{item.governance.sensitivity}</dd></div><div><dt>更新时间</dt><dd>{formatDate(item.governance.updatedAt)}</dd></div></dl><div className="note"><span>沉淀理由</span><p>{item.governance.createdReason}</p></div><div className="note"><span>来源证据（审核时对照原文）</span><EvidenceBlock api={api} evidenceIds={item.sources.map((source) => source.evidenceId)} /></div><div className="detail-actions">{item.governance.status === "draft" && <><button className="primary" onClick={() => void onTransition("verified")}><Check size={16} />验证通过</button><button className="danger" onClick={() => void onTransition("rejected")}><X size={16} />拒绝</button></>} {(item.governance.status === "verified" || item.governance.status === "deprecated") && <button className="secondary" onClick={() => void onTransition("archived")}>归档</button>}</div><FeedbackBar key={item.id} api={api} assetKind="memory" assetId={item.id} /></div>;
 }
 
 function MemoryDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (input: { evidence: string; content: string; layer: "l1" | "l2" | "l3"; confidence: number; reason: string }) => Promise<void> }) {

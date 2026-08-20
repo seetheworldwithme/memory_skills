@@ -14,9 +14,12 @@ import { ProposalService } from "../extraction/proposal-service.js";
 import type { ProposalJobInput } from "../extraction/interfaces.js";
 import type { LlmProvider } from "../llm/types.js";
 import type { EventSink } from "../observability/event-sink.js";
+import { EVENT_SCHEMA_VERSION, errorCodeFor, type RetrievalAutoSyncCompletedEvent, type RetrievalAutoSyncFailedEvent } from "../observability/events.js";
 import { EmbeddingSyncService } from "../retrieval/embedding-sync.js";
-import type { EmbeddingProvider, Retriever, VectorIndex } from "../retrieval/types.js";
+import type { AssetKind, EmbeddingProvider, Retriever, VectorIndex } from "../retrieval/types.js";
 import type { Scope } from "../governance/types.js";
+import { FeedbackService } from "../feedback/feedback-service.js";
+import type { FeedbackAssetKind, FeedbackKind } from "../feedback/types.js";
 
 export function createMemorySkillsServer(options: {
   repository: SqliteRepository;
@@ -46,10 +49,11 @@ export function createMemorySkillsServer(options: {
       ...(options.embedding.batchSize === undefined ? {} : { batchSize: options.embedding.batchSize }),
     })
     : undefined;
+  const feedback = new FeedbackService(options.repository);
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, memory, skills, context, proposals, embeddingSync, options.repository, options.accessKey, options.webRoot);
+      await route(request, response, memory, skills, context, proposals, embeddingSync, feedback, options.repository, options.accessKey, options.webRoot, options.eventSink);
     } catch (error) {
       const status = error instanceof DomainError
         ? error.status
@@ -78,9 +82,11 @@ async function route(
   context: ContextService,
   proposals: ProposalService | undefined,
   embeddingSync: EmbeddingSyncService | undefined,
+  feedback: FeedbackService,
   repository: SqliteRepository,
   accessKey: string,
   webRoot?: string,
+  eventSink?: EventSink,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
@@ -174,7 +180,16 @@ async function route(
   const memoryStatus = url.pathname.match(/^\/v1\/memories\/([^/]+)\/status$/);
   if (method === "POST" && memoryStatus) {
     const body = await readJson(request) as { scope: Parameters<MemoryService["transition"]>[1]; target: GovernedStatus };
-    send(response, 200, memory.transition(decodeURIComponent(memoryStatus[1]!), body.scope, body.target));
+    const asset = memory.transition(decodeURIComponent(memoryStatus[1]!), body.scope, body.target);
+    // 治理转换成功后自动同步向量索引：同步是索引维护而非提案/发布，
+    // 失败只记事件，绝不影响治理操作本身的结果
+    await syncVectorsAfterTransition(embeddingSync, eventSink, {
+      trigger: "memory.transition",
+      assetKind: "memory",
+      assetId: asset.id,
+      scope: asset.scope,
+    });
+    send(response, 200, asset);
     return;
   }
 
@@ -235,7 +250,15 @@ async function route(
   const skillStatus = url.pathname.match(/^\/v1\/skills\/([^/]+)\/status$/);
   if (method === "POST" && skillStatus) {
     const body = await readJson(request) as { scope: Parameters<SkillService["transition"]>[1]; target: GovernedStatus };
-    send(response, 200, skills.transition(decodeURIComponent(skillStatus[1]!), body.scope, body.target));
+    const skill = skills.transition(decodeURIComponent(skillStatus[1]!), body.scope, body.target);
+    // 与记忆转换一致：Verify/Reject 等状态变化后自动对齐向量索引
+    await syncVectorsAfterTransition(embeddingSync, eventSink, {
+      trigger: "skill.transition",
+      assetKind: "skill",
+      assetId: skill.id,
+      scope: skill.scope,
+    });
+    send(response, 200, skill);
     return;
   }
 
@@ -249,9 +272,89 @@ async function route(
     return;
   }
 
+  if (method === "POST" && url.pathname === "/v1/feedback") {
+    // 显式反馈：只采集人工判断（四分类 + 关联召回请求与资产版本），
+    // 不触发任何资产状态或内容的自动变更
+    const body = await readJson(request) as {
+      id?: string;
+      assetKind: FeedbackAssetKind;
+      assetId: string;
+      scope: Scope;
+      kind: FeedbackKind;
+      requestId?: string;
+      comment?: string;
+    };
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    if (!body.assetId || !body.assetKind || !body.kind) {
+      send(response, 400, { error: "BAD_REQUEST", message: "assetKind, assetId and kind are required" });
+      return;
+    }
+    send(response, 200, feedback.submit(body));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/feedback/list") {
+    const body = await readJson(request) as { scope: Scope };
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    send(response, 200, { items: feedback.list(body.scope) });
+    return;
+  }
+
   if (method === "GET" && !url.pathname.startsWith("/v1/") && webRoot && await serveWeb(response, webRoot, url.pathname)) return;
 
   send(response, 404, { error: "NOT_FOUND", message: "route not found" });
+}
+
+/**
+ * 治理状态转换成功后的自动向量同步：把该资产作用域内可召回资产增量
+ * 同步进向量索引（内容指纹未变则跳过，开销与变更资产数成正比）。
+ * 解决的问题：hybrid 模式下新 Verify 的资产若忘记手动 /v1/retrieval/sync，
+ * 在此之前只走词法通道。同步属于索引维护而非提案或发布，在治理边界内；
+ * 词法模式（未注入向量组件）直接跳过，任何失败只记事件、不影响治理操作。
+ */
+async function syncVectorsAfterTransition(
+  embeddingSync: EmbeddingSyncService | undefined,
+  eventSink: EventSink | undefined,
+  input: { trigger: string; assetKind: AssetKind; assetId: string; scope: Scope },
+): Promise<void> {
+  if (!embeddingSync) return;
+  try {
+    const report = await embeddingSync.sync({ scope: input.scope });
+    if (!eventSink) return;
+    const event: RetrievalAutoSyncCompletedEvent = {
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      eventType: "retrieval.auto_sync.completed",
+      timestamp: new Date().toISOString(),
+      trigger: input.trigger,
+      assetKind: input.assetKind,
+      assetId: input.assetId,
+      scope: input.scope,
+      embedded: report.memories.embedded + report.skills.embedded,
+      removed: report.memories.removed + report.skills.removed,
+    };
+    eventSink.emit(event);
+  } catch (error) {
+    if (!eventSink) return;
+    const event: RetrievalAutoSyncFailedEvent = {
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      eventType: "retrieval.auto_sync.failed",
+      timestamp: new Date().toISOString(),
+      trigger: input.trigger,
+      assetKind: input.assetKind,
+      assetId: input.assetId,
+      scope: input.scope,
+      // 只记错误码与错误名；错误消息可能拼接资产内容，不进入事件
+      errorCode: errorCodeFor(error),
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    };
+    eventSink.emit(event);
+  }
 }
 
 async function serveWeb(response: ServerResponse, webRoot: string, pathname: string): Promise<boolean> {

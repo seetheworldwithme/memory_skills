@@ -113,7 +113,9 @@ claude mcp add memory-skills --scope local \
 
 服务默认词法检索；配置 `MEMORY_SKILLS_RETRIEVAL=hybrid` 并配齐 Embedding
 环境变量后，`/v1/context/recall` 走词法 + 向量双通道确定性融合，向量故障自动
-降级为词法。启用后需按作用域调用 `POST /v1/retrieval/sync` 同步向量索引。
+降级为词法。记忆/Skill 的治理状态转换（Verify/Reject/归档等）成功后会自动
+增量同步向量索引，新 Verify 的资产即时进入向量通道；`POST /v1/retrieval/sync`
+保留用于初始化、换模型后补齐或自动同步失败后的补救。
 设计、环境变量与启用门槛见 `docs/retrieval.md`。
 
 ## Attribution

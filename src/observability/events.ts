@@ -11,6 +11,8 @@ export type ObservabilityEventType =
   | "service.started"
   | "context.recall.completed"
   | "context.recall.failed"
+  | "retrieval.auto_sync.completed"
+  | "retrieval.auto_sync.failed"
   | "event.redacted";
 
 /** 事件公共信封字段，所有事件都必须携带。 */
@@ -71,10 +73,37 @@ export interface EventRedactedEvent extends EventEnvelope {
   reason: "forbidden-value-detected";
 }
 
+/** 自动向量同步成功事件：治理状态转换后触发，只携带计数与触发来源，不携带资产正文。 */
+export interface RetrievalAutoSyncCompletedEvent extends EventEnvelope {
+  eventType: "retrieval.auto_sync.completed";
+  /** 触发来源：memory.transition / skill.transition。 */
+  trigger: string;
+  assetKind: "memory" | "skill";
+  assetId: string;
+  scope: Scope;
+  /** 本次增量实际嵌入的资产数（记忆 + Skill）。 */
+  embedded: number;
+  /** 本次清理的失效向量行数（记忆 + Skill）。 */
+  removed: number;
+}
+
+/** 自动向量同步失败事件：同步失败只记事件，不影响治理状态转换本身。 */
+export interface RetrievalAutoSyncFailedEvent extends EventEnvelope {
+  eventType: "retrieval.auto_sync.failed";
+  trigger: string;
+  assetKind: "memory" | "skill";
+  assetId: string;
+  scope: Scope;
+  errorCode: string;
+  errorName: string;
+}
+
 export type ObservabilityEvent =
   | ServiceStartedEvent
   | ContextRecallCompletedEvent
   | ContextRecallFailedEvent
+  | RetrievalAutoSyncCompletedEvent
+  | RetrievalAutoSyncFailedEvent
   | EventRedactedEvent;
 
 /**
@@ -91,6 +120,8 @@ const FIELD_ALLOWLIST: Record<ObservabilityEventType, readonly string[]> = {
     "truncated", "warningCodes", "matchStrategies",
   ],
   "context.recall.failed": ["requestId", "scope", "durationMs", "queryChars", "errorCode", "errorName"],
+  "retrieval.auto_sync.completed": ["trigger", "assetKind", "assetId", "scope", "embedded", "removed"],
+  "retrieval.auto_sync.failed": ["trigger", "assetKind", "assetId", "scope", "errorCode", "errorName"],
   "event.redacted": ["originalEventType", "reason"],
 };
 
