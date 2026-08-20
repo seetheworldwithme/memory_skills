@@ -10,6 +10,9 @@ import type { SqliteRepository } from "../storage/sqlite-repository.js";
 import { DomainError } from "../errors.js";
 import { GovernanceError } from "../governance/lifecycle.js";
 import { ContextService } from "../context/context-service.js";
+import { ProposalService } from "../extraction/proposal-service.js";
+import type { ProposalJobInput } from "../extraction/interfaces.js";
+import type { LlmProvider } from "../llm/types.js";
 import type { EventSink } from "../observability/event-sink.js";
 
 export function createMemorySkillsServer(options: {
@@ -17,6 +20,8 @@ export function createMemorySkillsServer(options: {
   accessKey: string;
   webRoot?: string;
   eventSink?: EventSink;
+  /** 模型 Provider：未注入时提案 API 返回 503，其余能力不受影响。 */
+  llmProvider?: LlmProvider;
 }): Server {
   if (!options.accessKey.trim()) throw new Error("accessKey must not be empty");
   const memory = new MemoryService(options.repository);
@@ -24,10 +29,13 @@ export function createMemorySkillsServer(options: {
   const context = new ContextService(memory, skills, undefined, {
     ...(options.eventSink === undefined ? {} : { eventSink: options.eventSink }),
   });
+  const proposals = options.llmProvider
+    ? new ProposalService({ memory, skills, repository: options.repository, provider: options.llmProvider })
+    : undefined;
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, memory, skills, context, options.accessKey, options.webRoot);
+      await route(request, response, memory, skills, context, proposals, options.repository, options.accessKey, options.webRoot);
     } catch (error) {
       const status = error instanceof DomainError
         ? error.status
@@ -54,6 +62,8 @@ async function route(
   memory: MemoryService,
   skills: SkillService,
   context: ContextService,
+  proposals: ProposalService | undefined,
+  repository: SqliteRepository,
   accessKey: string,
   webRoot?: string,
 ): Promise<void> {
@@ -94,6 +104,37 @@ async function route(
   if (method === "DELETE" && url.pathname.startsWith("/v1/evidence/")) {
     const body = await readJson(request) as { scope: Parameters<MemoryService["deleteEvidence"]>[1] };
     send(response, 200, memory.deleteEvidence(decodeURIComponent(url.pathname.slice("/v1/evidence/".length)), body.scope));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/evidence/get") {
+    // 批量取证据原文（严格限定作用域）：供 Web 审核时对照 Draft 的来源
+    const body = await readJson(request) as {
+      scope: Parameters<MemoryService["deleteEvidence"]>[1];
+      ids: string[];
+    };
+    if (!Array.isArray(body.ids)) {
+      send(response, 400, { error: "BAD_REQUEST", message: "ids must be an array" });
+      return;
+    }
+    const items = body.ids
+      .map((id) => repository.getEvidenceScoped(id, body.scope))
+      .filter((evidence): evidence is NonNullable<typeof evidence> => evidence !== undefined);
+    send(response, 200, { items });
+    return;
+  }
+
+  if (method === "POST" && (url.pathname === "/v1/proposals/memory/run" || url.pathname === "/v1/proposals/skill/run")) {
+    // 人工触发的提案 API：无论模型输出什么，只会创建 Draft，不会直接产生 Verified 资产
+    if (!proposals) {
+      send(response, 503, { error: "LLM_CONFIG_ERROR", message: "LLM Provider 未配置或初始化失败，提案功能不可用" });
+      return;
+    }
+    const input = await readJson(request) as ProposalJobInput;
+    const report = url.pathname === "/v1/proposals/memory/run"
+      ? await proposals.runMemoryProposal(input)
+      : await proposals.runSkillProposal(input);
+    send(response, 200, report);
     return;
   }
 

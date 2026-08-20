@@ -31,6 +31,25 @@ export interface SkillDocument {
   updatedAt: string;
 }
 
+export interface EvidenceRecord {
+  id: string;
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  capturedAt: string;
+}
+
+/** 提案 Job 报告（与后端 ProposalJobReport 对应）。 */
+export interface ProposalRunReport<TCreated> {
+  kind: "memory" | "skill";
+  model: string;
+  promptVersion: string;
+  inputEvidenceIds: string[];
+  created: TCreated[];
+  rejected: Array<{ index: number; summary: string; reasons: string[] }>;
+  attempts: number;
+  latencyMs: number;
+}
+
 interface ApiErrorBody { error?: string; message?: string }
 
 export class ApiError extends Error {
@@ -80,6 +99,21 @@ export class ApiClient {
 
   async transitionMemory(id: string, target: Status): Promise<void> {
     await this.request(`/v1/memories/${encodeURIComponent(id)}/status`, { scope: LOCAL_SCOPE, target });
+  }
+
+  /** 批量取来源证据原文，供审核 Draft 时对照。 */
+  async getEvidence(ids: string[]): Promise<EvidenceRecord[]> {
+    return (await this.request<{ items: EvidenceRecord[] }>("/v1/evidence/get", { scope: LOCAL_SCOPE, ids })).items;
+  }
+
+  /** 人工触发的记忆提案：模型从最近证据提取候选，只产出 Draft。 */
+  async runMemoryProposal(): Promise<ProposalRunReport<MemoryAsset>> {
+    return this.request("/v1/proposals/memory/run", { scope: LOCAL_SCOPE });
+  }
+
+  /** 人工触发的 Skill 提案：模型从最近证据提取候选，只产出 Draft。 */
+  async runSkillProposal(): Promise<ProposalRunReport<SkillDocument>> {
+    return this.request("/v1/proposals/skill/run", { scope: LOCAL_SCOPE });
   }
 
   async listSkills(): Promise<SkillDocument[]> {

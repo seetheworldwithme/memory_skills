@@ -1,7 +1,8 @@
-import { BrainCircuit, Check, Plus, Search, X } from "lucide-react";
+import { BrainCircuit, Check, Plus, Search, Sparkles, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { StatusBadge } from "../components/StatusBadge";
+import { EvidenceBlock } from "../components/EvidenceBlock";
 import type { ApiClient, MemoryAsset } from "../lib/api";
 
 export function MemoryPage({ api }: { api: ApiClient }) {
@@ -11,6 +12,8 @@ export function MemoryPage({ api }: { api: ApiClient }) {
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const [proposing, setProposing] = useState(false);
+  const [proposalNote, setProposalNote] = useState<string>();
 
   const load = useCallback(async () => {
     try {
@@ -30,12 +33,32 @@ export function MemoryPage({ api }: { api: ApiClient }) {
   const filtered = useMemo(() => items.filter((item) => item.content.toLowerCase().includes(query.toLowerCase())), [items, query]);
   const selected = items.find((item) => item.id === selectedId);
 
+  // 人工触发记忆提案：模型从最近证据提取候选，只产出 Draft，随后刷新列表供审核
+  const runProposal = async () => {
+    try {
+      setProposing(true);
+      setProposalNote(undefined);
+      const report = await api.runMemoryProposal();
+      const rejectedNote = report.rejected.length > 0 ? `；拒绝 ${report.rejected.length} 条候选（占位、敏感、重复或缺少来源）` : "";
+      setProposalNote(`已生成 ${report.created.length} 条草稿${rejectedNote} · 模型 ${report.model || "未调用"} · ${report.latencyMs}ms`);
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "提案生成失败");
+    } finally {
+      setProposing(false);
+    }
+  };
+
   return (
     <section className="workspace">
       <header className="page-head">
         <div><p className="eyebrow">MEMORY / GOVERNED ASSETS</p><h1>记忆资产</h1><p>审查从对话证据中沉淀的长期事实与偏好。</p></div>
-        <button className="primary" onClick={() => setCreating(true)}><Plus size={17} />新建记忆</button>
+        <div className="page-actions">
+          <button className="secondary" onClick={() => void runProposal()} disabled={proposing}><Sparkles size={17} />{proposing ? "生成中…" : "从证据生成草稿"}</button>
+          <button className="primary" onClick={() => setCreating(true)}><Plus size={17} />新建记忆</button>
+        </div>
       </header>
+      {proposalNote && <div className="info-banner">{proposalNote}</div>}
       {error && <div className="error-banner">{error}</div>}
       <div className="split-panel">
         <aside className="asset-list">
@@ -54,7 +77,7 @@ export function MemoryPage({ api }: { api: ApiClient }) {
           </div>
         </aside>
         <main className="detail-pane">
-          {selected ? <MemoryDetail item={selected} onTransition={async (target) => { try { await api.transitionMemory(selected.id, target); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "状态更新失败"); } }} /> : <Empty icon={<BrainCircuit />} text="选择一条记忆查看详情" />}
+          {selected ? <MemoryDetail item={selected} api={api} onTransition={async (target) => { try { await api.transitionMemory(selected.id, target); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "状态更新失败"); } }} /> : <Empty icon={<BrainCircuit />} text="选择一条记忆查看详情" />}
         </main>
       </div>
       {creating && <MemoryDialog onClose={() => setCreating(false)} onSubmit={async (input) => { await api.createMemory(input); setCreating(false); await load(); }} />}
@@ -62,8 +85,8 @@ export function MemoryPage({ api }: { api: ApiClient }) {
   );
 }
 
-function MemoryDetail({ item, onTransition }: { item: MemoryAsset; onTransition: (target: "verified" | "rejected" | "archived") => Promise<void> }) {
-  return <div className="detail-content"><div className="detail-title"><div><span className="mono-id">{item.id}</span><h2>{item.content}</h2></div><StatusBadge status={item.governance.status} /></div><dl className="facts"><div><dt>层级</dt><dd>{item.layer.toUpperCase()}</dd></div><div><dt>可信度</dt><dd>{Math.round(item.governance.confidence * 100)}%</dd></div><div><dt>敏感度</dt><dd>{item.governance.sensitivity}</dd></div><div><dt>更新时间</dt><dd>{formatDate(item.governance.updatedAt)}</dd></div></dl><div className="note"><span>沉淀理由</span><p>{item.governance.createdReason}</p></div><div className="note"><span>来源证据</span><p>{item.sources.length ? item.sources.map((source) => source.evidenceId).join("、") : "无"}</p></div><div className="detail-actions">{item.governance.status === "draft" && <><button className="primary" onClick={() => void onTransition("verified")}><Check size={16} />验证通过</button><button className="danger" onClick={() => void onTransition("rejected")}><X size={16} />拒绝</button></>} {(item.governance.status === "verified" || item.governance.status === "deprecated") && <button className="secondary" onClick={() => void onTransition("archived")}>归档</button>}</div></div>;
+function MemoryDetail({ item, api, onTransition }: { item: MemoryAsset; api: ApiClient; onTransition: (target: "verified" | "rejected" | "archived") => Promise<void> }) {
+  return <div className="detail-content"><div className="detail-title"><div><span className="mono-id">{item.id}</span><h2>{item.content}</h2></div><StatusBadge status={item.governance.status} /></div><dl className="facts"><div><dt>层级</dt><dd>{item.layer.toUpperCase()}</dd></div><div><dt>可信度</dt><dd>{Math.round(item.governance.confidence * 100)}%</dd></div><div><dt>敏感度</dt><dd>{item.governance.sensitivity}</dd></div><div><dt>更新时间</dt><dd>{formatDate(item.governance.updatedAt)}</dd></div></dl><div className="note"><span>沉淀理由</span><p>{item.governance.createdReason}</p></div><div className="note"><span>来源证据（审核时对照原文）</span><EvidenceBlock api={api} evidenceIds={item.sources.map((source) => source.evidenceId)} /></div><div className="detail-actions">{item.governance.status === "draft" && <><button className="primary" onClick={() => void onTransition("verified")}><Check size={16} />验证通过</button><button className="danger" onClick={() => void onTransition("rejected")}><X size={16} />拒绝</button></>} {(item.governance.status === "verified" || item.governance.status === "deprecated") && <button className="secondary" onClick={() => void onTransition("archived")}>归档</button>}</div></div>;
 }
 
 function MemoryDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (input: { evidence: string; content: string; layer: "l1" | "l2" | "l3"; confidence: number; reason: string }) => Promise<void> }) {

@@ -165,6 +165,54 @@ DELETE /v1/evidence/:id
 
 The response reports directly derived memory assets that were archived.
 
+## Get evidence by ids
+
+批量获取证据原文（严格限定作用域）；供 Web 控制台在审核 Draft 时对照来源。
+
+```http
+POST /v1/evidence/get
+```
+
+```json
+{
+  "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" },
+  "ids": ["ev-1", "ev-2"]
+}
+```
+
+返回 `{ "items": [Evidence] }`；不在该作用域内的 ID 会被静默过滤。
+
+## Run memory proposals（人工触发的记忆提案）
+
+```http
+POST /v1/proposals/memory/run
+```
+
+```json
+{
+  "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" },
+  "evidenceIds": ["ev-1"],
+  "maxEvidence": 20
+}
+```
+
+- `evidenceIds` 可省略：默认取该作用域最近 20 条证据（时间倒序）；
+- 调用 LLM Provider 提取记忆候选，经校验（占位、敏感信息、来源、去重）后**只创建 Draft**；
+- 报告包含 `model`、`promptVersion`、`inputEvidenceIds`、`created`（Draft 列表）、`rejected`（候选被拒原因）、`usage`、`attempts`、`latencyMs`；
+- 没有可用证据时不调用模型，直接返回空报告；
+- 服务端未配置可用的 LLM Provider 时返回 `503 LLM_CONFIG_ERROR`。
+
+## Run skill proposals（人工触发的 Skill 提案）
+
+```http
+POST /v1/proposals/skill/run
+```
+
+请求与响应结构与记忆提案相同；模型输出完整的 SKILL.md 候选，校验通过后同样只创建 Draft。
+
+治理边界：无论模型输出什么，提案 API 永不直接产生 Verified 资产；发布只能通过既有的
+`POST /v1/memories/:id/status` 与 `POST /v1/skills/:id/status` 由人工完成。
+
 ## Skills
 
 ```text

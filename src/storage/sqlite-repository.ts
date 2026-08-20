@@ -122,6 +122,18 @@ export class SqliteRepository {
     return evidence && sameScope(evidence.scope, scope) ? evidence : undefined;
   }
 
+  /** 按作用域列出证据，时间倒序（最新在前）；提案流水线默认取最近一批。 */
+  listEvidence(scope: Scope, limit = 50): Evidence[] {
+    if (!Number.isInteger(limit) || limit <= 0) throw new Error("limit must be a positive integer");
+    const rows = this.db.prepare(`
+      SELECT * FROM evidence
+      WHERE user_id = ? AND team_id = ? AND agent_id = ? AND IFNULL(session_id, '') = IFNULL(?, '')
+      ORDER BY captured_at DESC, id DESC
+      LIMIT ?
+    `).all(scope.userId, scope.teamId, scope.agentId, scope.sessionId ?? null, limit) as DbRow[];
+    return rows.map(rowToEvidence);
+  }
+
   countEvidence(): number {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM evidence").get() as DbRow;
     return Number(row.count);

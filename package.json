@@ -33,6 +33,7 @@
     "build:web": "npm --prefix web run build",
     "eval:retrieval": "node --import tsx evals/run-context-recall.ts",
     "eval:retrieval:strict": "node --import tsx evals/run-context-recall.ts --strict",
+    "smoke:model-provider": "npm run build:server && node --env-file-if-exists=.env scripts/smoke-model-provider.mjs",
     "start": "node dist/server.js",
     "mcp": "node dist/adapters/mcp/server.js",
     "dev": "tsx src/server.ts",
