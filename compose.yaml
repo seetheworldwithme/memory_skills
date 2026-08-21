@@ -13,6 +13,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      # 容器内必须监听 0.0.0.0 端口映射才可达；environment 优先级高于 env_file，
+      # 防止 .env 里的 127.0.0.1（本机默认值）覆盖后把服务锁进容器回环
+      MEMORY_SKILLS_HOST: 0.0.0.0
       # 数据目录语义显式声明（容器内 CWD 为 /app，实际路径 /app/data/...）
       MEMORY_SKILLS_DB: data/memory-skills.db
       MEMORY_SKILLS_BACKUP_DIR: data/backups
@@ -20,6 +23,34 @@ services:
       - "8421:8421"
     volumes:
       - data:/app/data
+
+  # 远程 MCP（Streamable HTTP，Task 19）：与 api 同镜像不同角色，
+  # 本地 Agent 宿主连接 http://<服务器地址>:8422/mcp（Bearer Token 认证）
+  mcp:
+    image: memory-skills:local
+    restart: unless-stopped
+    command: ["node", "dist/adapters/mcp/http-server.js"]
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # 出站回调主服务（compose 网络内服务名直连）；environment 优先级高于 env_file，
+      # 可防止 .env 里的本地地址覆盖容器内地址
+      MEMORY_SKILLS_URL: http://api:8421
+      MEMORY_SKILLS_MCP_HOST: 0.0.0.0
+      MEMORY_SKILLS_MCP_PORT: 8422
+      # 仅供镜像 HEALTHCHECK 探测本进程 /health 使用（MCP 进程本身只读 MCP_* 变量）
+      MEMORY_SKILLS_PORT: 8422
+      # 公网部署建议配置（逗号分隔）：Host/Origin 允许列表，见 docs/integrations/remote-mcp.md
+      # MEMORY_SKILLS_MCP_ALLOWED_HOSTS: your-domain.example
+      # MEMORY_SKILLS_MCP_ALLOWED_ORIGINS: https://your-domain.example
+    ports:
+      - "8422:8422"
+    # 团队模式下 Token 配置只读挂载（文件只存 sha256 哈希）：
+    # volumes:
+    #   - ./tokens.json:/app/tokens.json:ro
+    # environment 追加：MEMORY_SKILLS_AUTH_TOKENS_FILE: /app/tokens.json
 
 volumes:
   data:

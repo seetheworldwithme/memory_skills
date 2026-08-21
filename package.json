@@ -41,6 +41,7 @@
     "restore": "node --import tsx scripts/restore.mjs",
     "start": "node --env-file-if-exists=.env dist/server.js",
     "mcp": "node dist/adapters/mcp/server.js",
+    "mcp:http": "node --env-file-if-exists=.env dist/adapters/mcp/http-server.js",
     "dev": "tsx src/server.ts",
     "dev:web": "npm --prefix web run dev"
   },
