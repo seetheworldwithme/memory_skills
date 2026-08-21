@@ -27,9 +27,8 @@ export interface MatchMetadata {
   matchedTerms: string[];
 }
 
-export interface ContractedMemory extends RecalledMemory {
-  match: MatchMetadata;
-}
+// RecalledMemory 自带 match 元数据，契约层不再重复声明（结构见 memory/types.ts）
+export interface ContractedMemory extends RecalledMemory {}
 
 export interface ContractedSkill extends RecalledSkill {
   match: MatchMetadata;

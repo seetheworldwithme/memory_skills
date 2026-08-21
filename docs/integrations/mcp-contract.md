@@ -48,6 +48,8 @@
 
 `recall_context` 返回版本化上下文契约（`contractVersion`、`requestId`、`memories`、`skills`、`budget`、`truncated`、`warnings`），与 `POST /v1/context/recall` 使用同一 Schema；文本块仅为兼容展示，宿主应优先读取 `structuredContent`。
 
+命中的 Memory 条目（`recall_context` 的 `memories[i]` 与 `recall_memory` 的 `items[i]`）都携带 `match` 命中元数据（`strategy`：lexical/vector/hybrid、`score`、`matchedTerms`），供宿主解释"为什么被召回"；两个工具的输出 Schema 均要求该字段，缺失会被服务端校验拒绝。
+
 ## 回归测试
 
 - `tests/mcp-tool-catalog.test.ts`：目录完整性、两次构建定义一致（所有宿主拿到相同 Schema）、指令前 512 字符规则、作用域不可覆盖、Draft 拒绝、输入校验。

@@ -3,7 +3,8 @@ import type { Scope, SourceReference } from "../governance/types.js";
 import type { SqliteRepository } from "../storage/sqlite-repository.js";
 import type { Evidence, EvidenceRole, MemoryAsset, MemoryLayer, RecalledMemory } from "./types.js";
 import { NotFoundError } from "../errors.js";
-import { lexicalScore } from "../retrieval/text-match.js";
+import { lexicalScore, matchedQueryTerms } from "../retrieval/text-match.js";
+import type { MatchMetadata } from "../context/contract.js";
 
 export class MemoryService {
   constructor(
@@ -140,13 +141,26 @@ export class MemoryService {
       .filter((asset) => !asset.governance.validUntil || asset.governance.validUntil >= now);
   }
 
-  /** 词法打分排序：分数 = lexicalScore * confidence，过滤零分，保持过滤后的枚举顺序。 */
+  /**
+   * 词法打分排序：分数 = lexicalScore * confidence，过滤零分，保持过滤后的枚举顺序。
+   * 每条命中附带 match 元数据（策略/四舍五入分数/命中片段），与上下文契约的
+   * toMatchMetadata 同构——MCP recall_memory 的输出 Schema 要求该字段。
+   */
   private rankLexically(assets: MemoryAsset[], query: string): RecalledMemory[] {
     return assets
       .map((asset) => ({ asset, score: lexicalScore(query, asset.content) * asset.governance.confidence }))
       .filter(({ score: value }) => value > 0)
       .sort((a, b) => b.score - a.score)
-      .map(({ asset, score: value }) => ({ ...asset, score: value, truncated: false }));
+      .map(({ asset, score: value }) => ({
+        ...asset,
+        score: value,
+        truncated: false,
+        match: {
+          strategy: "lexical",
+          score: Number(value.toFixed(4)),
+          matchedTerms: matchedQueryTerms(query, asset.content),
+        } satisfies MatchMetadata,
+      }));
   }
 
   /**

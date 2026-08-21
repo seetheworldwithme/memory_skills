@@ -10,6 +10,7 @@ import {
 
 import { resolveAuthServiceFromEnv, type AuthService } from "../../auth/auth-service.js";
 import { canPerform } from "../../auth/authorization-policy.js";
+import { readRequestBody, RequestBodyTooLargeError } from "../../api/read-request-body.js";
 import { StderrEventSink, resolveEventSinkFromEnv } from "../../observability/jsonl-event-sink.js";
 import { AuditService } from "../../security/audit-service.js";
 import { RateLimiter, resolveRateLimitRulesFromEnv } from "../../security/rate-limit.js";
@@ -141,7 +142,7 @@ export function createMcpHttpServer(options: McpHttpServerOptions): Server {
       webRequest = await toWebRequest(request, method);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const tooLarge = message === "request body exceeds 1MB";
+      const tooLarge = error instanceof RequestBodyTooLargeError;
       response.writeHead(tooLarge ? 413 : 400, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: tooLarge ? "PAYLOAD_TOO_LARGE" : "BAD_REQUEST", message }));
       return;
@@ -183,17 +184,11 @@ async function toWebRequest(request: IncomingMessage, method: string): Promise<R
   }
   let body: Uint8Array<ArrayBuffer> | undefined;
   if (method === "POST") {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const chunk of request) {
-      size += chunk.length;
-      if (size > MCP_MAX_BODY_BYTES) throw new Error("request body exceeds 1MB");
-      chunks.push(chunk as Buffer);
-    }
-    if (chunks.length > 0) {
+    // 读取器在超限时先排空残余请求体再抛错，避免慢管道上的背压死锁（见 read-request-body.ts）
+    const merged = await readRequestBody(request, MCP_MAX_BODY_BYTES);
+    if (merged.length > 0) {
       // 拷贝到独立 ArrayBuffer：exactOptionalPropertyTypes 下 BodyInit 需要
       // Uint8Array<ArrayBuffer>，池化 Buffer（ArrayBufferLike）不满足该窄化
-      const merged = Buffer.concat(chunks);
       body = new Uint8Array(merged.byteLength);
       body.set(merged);
     }

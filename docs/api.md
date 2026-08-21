@@ -110,6 +110,13 @@ Draft memory is excluded unless `includeDraft` is explicitly true.
 `includeDraft: true` 属于审核能力：只有具备 review 动作的角色（admin/reviewer）
 可用，reader 请求会得到 403 `FORBIDDEN_ACTION`。
 
+响应条目在 `score`（原始相关性分）之外还携带 `match` 命中元数据
+（`strategy`：lexical/vector/hybrid；`score`：四舍五入到 4 位的展示分；
+`matchedTerms`：查询中实际命中正文的片段），与 `recall_context` 的
+memories 条目同构；MCP `recall_memory` 工具的输出 Schema 要求该字段。
+`/v1/recall` 的排序恒为 lexical（confidence 加权），混合检索只在
+`/v1/context/recall` 生效。
+
 ## Unified context recall
 
 ```http

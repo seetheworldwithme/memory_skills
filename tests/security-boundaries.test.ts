@@ -181,7 +181,7 @@ test("审计事件：授权拒绝与状态变更被完整记录，且不含资�
   }
 });
 
-test("超限请求体被拒绝：1MB 大小红线保持不变", async () => {
+test("超限请求体被拒绝：1MB 大小红线保持不变，残余 body 被排空（不背压死锁）", async () => {
   const { base, close } = await startSecurityServer({
     login: { limit: 20, windowMs: 60_000 },
     loginFailure: { limit: 10, windowMs: 60_000 },
@@ -189,10 +189,20 @@ test("超限请求体被拒绝：1MB 大小红线保持不变", async () => {
     read: { limit: 50, windowMs: 60_000 },
   });
   try {
+    // 超限 100KB：服务端读到 1MB 即停手后必须继续排空残余数据——否则在小缓冲区
+    // 管道（Linux CI Runner）上客户端写不完请求就不处理响应，双方互等死锁
     const oversized = await post(base, "/v1/evidence", {
       id: "big", scope, role: "user", content: "x".repeat(1_100_000),
     }, LOCAL_KEY);
     assert.equal(oversized.status, 400);
+    // 更大超限（2MB）走同一条排空路径，确认排空不受单块 chunk 边界影响
+    const muchLarger = await post(base, "/v1/evidence", {
+      id: "bigger", scope, role: "user", content: "y".repeat(2_000_000),
+    }, LOCAL_KEY);
+    assert.equal(muchLarger.status, 400);
+    // 拒绝后服务器与连接池仍可用：正常请求不受超限请求影响
+    const healthy = await fetch(`${base}/health`);
+    assert.equal(healthy.status, 200);
   } finally {
     await close();
   }

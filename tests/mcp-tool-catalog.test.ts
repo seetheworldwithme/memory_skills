@@ -10,6 +10,10 @@ import {
   readOnlyAnnotations,
 } from "../src/adapters/mcp/tool-catalog.js";
 import { MCP_TOOL_POLICY, mcpServerInstructions } from "../src/adapters/mcp/tool-policy.js";
+import { SqliteRepository } from "../src/storage/sqlite-repository.js";
+import { MemoryService } from "../src/memory/memory-service.js";
+import { SkillService } from "../src/skills/skill-service.js";
+import { ContextService } from "../src/context/context-service.js";
 
 const boundScope: Scope = { userId: "bound-user", teamId: "bound-team", agentId: "bound-agent" };
 
@@ -126,4 +130,51 @@ test("输入 Schema 保持既有校验：空查询被拒绝，预算字段有上
   assert.ok(!schema.safeParse({ query: "q", maxMemoryResults: 21 }).success);
   assert.ok(schema.safeParse({ query: "q", maxMemoryResults: 20 }).success);
   assert.ok(schema.safeParse({ query: "q", userId: "x" }).success, "未知字段被剥离而不是报错");
+});
+
+test("服务层真实召回输出满足各工具 outputSchema：命中必须带 match 元数据", async () => {
+  // 回归背景：recall_memory 的后端 /v1/recall 曾返回不含 match 对象的条目，
+  // 非空命中被 SDK 服务端输出校验整条拒绝（空结果不触发校验，假客户端返回
+  // 空数组掩盖了该缺陷）。本用例用真实服务链路的输出直接对 outputSchema
+  // 做解析，复现 SDK 的校验行为，任何字段缺失都会在测试层暴露。
+  const repository = new SqliteRepository(":memory:");
+  try {
+    const memory = new MemoryService(repository);
+    const skills = new SkillService(repository);
+    const context = new ContextService(memory, skills);
+
+    memory.capture({ id: "match-ev-1", scope: boundScope, role: "user", content: "用户偏好中文沟通" });
+    memory.propose({
+      id: "match-mem-1", layer: "l1", scope: boundScope, content: "用户偏好中文沟通",
+      confidence: 0.9, reason: "回归测试种子", sourceEvidenceIds: ["match-ev-1"],
+    });
+    memory.transition("match-mem-1", boundScope, "verified");
+
+    const client = fakeClient({
+      recallMemory: () => Promise.resolve({ items: memory.recall({ query: "中文沟通", scope: boundScope }) }),
+      recallContext: () => context.recall({ query: "中文沟通", scope: boundScope }),
+    });
+    const handlerContext = { client, defaultScope: boundScope };
+    const byName = new Map(createToolRegistrations().map((registration) => [registration.definition.name, registration]));
+
+    const recallMemory = byName.get("recall_memory")!;
+    const memoryOutput = await recallMemory.invoke({ query: "中文沟通" }, handlerContext);
+    // outputSchema 声明为宽泛的 z.ZodType，parse 结果收窄到断言所需的最小结构
+    const parsedMemory = recallMemory.definition.outputSchema!.parse(memoryOutput) as {
+      items: Array<{ match: { strategy: string; matchedTerms: string[] } }>;
+    };
+    assert.equal(parsedMemory.items.length, 1, "种子记忆必须被召回");
+    assert.equal(parsedMemory.items[0]!.match.strategy, "lexical");
+    assert.ok(parsedMemory.items[0]!.match.matchedTerms.length > 0, "命中片段非空");
+
+    const recallContext = byName.get("recall_context")!;
+    const contextOutput = await recallContext.invoke({ query: "中文沟通" }, handlerContext);
+    const parsedContext = recallContext.definition.outputSchema!.parse(contextOutput) as {
+      memories: Array<{ match: { strategy: string } }>;
+    };
+    assert.equal(parsedContext.memories.length, 1);
+    assert.equal(parsedContext.memories[0]!.match.strategy, "lexical");
+  } finally {
+    repository.close();
+  }
 });

@@ -13,6 +13,7 @@ import { MemoryService } from "../memory/memory-service.js";
 import { SkillService, SkillVersionConflictError } from "../skills/skill-service.js";
 import type { SqliteRepository } from "../storage/sqlite-repository.js";
 import { DomainError } from "../errors.js";
+import { readRequestBody } from "./read-request-body.js";
 import { GovernanceError } from "../governance/lifecycle.js";
 import { ContextService } from "../context/context-service.js";
 import { ProposalService } from "../extraction/proposal-service.js";
@@ -766,17 +767,14 @@ function contentType(filePath: string): string {
   } as Record<string, string>)[extname(filePath)] ?? "application/octet-stream";
 }
 
+/** 请求体硬上限（红线）：超过即 400 拒绝。 */
+const MAX_REQUEST_BODY_BYTES = 1_000_000;
+
+/** 读取并解析 JSON 请求体；空体视为 {}。字节上限与排空语义见 read-request-body.ts。 */
 async function readJson(request: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > 1_000_000) throw new Error("request body exceeds 1MB");
-    chunks.push(buffer);
-  }
-  if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const buffer = await readRequestBody(request, MAX_REQUEST_BODY_BYTES);
+  if (buffer.length === 0) return {};
+  return JSON.parse(buffer.toString("utf8"));
 }
 
 function send(response: ServerResponse, status: number, body: unknown): void {

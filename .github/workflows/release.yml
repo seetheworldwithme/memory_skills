@@ -38,8 +38,13 @@ jobs:
       - name: 构建（server tsc + web vite）
         run: npm run build
 
-      - name: 检索评测回归（strict）
-        run: npm run eval:retrieval:strict
+      # 与 ci.yml 同套确定性离线门禁：基线 + 混合管线离线一致性（零密钥零费用）。
+      # :strict 的 critical 全中硬门禁依赖真实模型语义召回，由投产前的 smoke 评测把关，不进零密钥流水线
+      - name: 检索评测回归（基线门禁）
+        run: npm run eval:retrieval
+
+      - name: 检索评测回归（混合管线离线一致性）
+        run: npm run eval:retrieval -- --hybrid
 
       - name: 依赖审计（根 + web，运行时依赖）
         run: npm audit --omit=dev --audit-level=high && npm --prefix web audit --omit=dev --audit-level=high

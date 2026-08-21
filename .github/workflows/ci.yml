@@ -44,8 +44,11 @@ jobs:
       - name: 检索评测回归（基线门禁）
         run: npm run eval:retrieval
 
-      - name: 检索评测回归（strict：critical 用例全中 + 零禁止命中）
-        run: npm run eval:retrieval:strict
+      # 混合管线离线一致性：Mock 零向量 Provider 走完整混合链路，断言与词法逐位一致（零密钥零费用）。
+      # 不跑 :strict——critical 全中的硬门禁依赖真实模型语义召回（词法离线恒 ~0.45），
+      # 该发布阈值由投产前的 smoke 评测把关（MEMORY_SKILLS_SMOKE=1），不能放进零密钥 CI
+      - name: 检索评测回归（混合管线离线一致性）
+        run: npm run eval:retrieval -- --hybrid
 
       # 依赖审计：只审计运行时依赖（--omit=dev），high 及以上即失败
       - name: 依赖审计（根，运行时依赖）

@@ -9,10 +9,18 @@ simulation of it.
 
 ```bash
 npm run eval:retrieval            # run metrics, fail on baseline regression
-npm run eval:retrieval:strict     # also enforce the release hard gate
+npm run eval:retrieval -- --hybrid  # also verify the hybrid pipeline matches lexical bit-for-bit (offline mock)
+npm run eval:retrieval:strict     # also enforce the release hard gate (needs real-model hybrid retrieval, see note)
 node --import tsx evals/run-context-recall.ts --verbose   # print returned ids per case
 node --import tsx evals/run-context-recall.ts --save-baseline  # rewrite baseline
 ```
+
+Note on `:strict` — the hard gate requires Recall@K = 1 on every critical
+case, which depends on semantic (embedding) recall; offline lexical-only runs
+score ~0.45 critical recall by design and will always fail it. Run strict only
+against a hybrid setup with the real embedding model (e.g. as part of the
+pre-release smoke evaluation); CI/release pipelines enforce the deterministic
+baseline + hybrid-consistency gates instead.
 
 ## Fixtures
 

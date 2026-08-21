@@ -43,6 +43,10 @@ test("HTTP API exposes capture, governance transition, and recall", async () => 
     const recall = await post(`${base}/v1/recall`, { query: "verification", scope }, accessKey);
     assert.equal(recall.items.length, 1);
     assert.equal(recall.items[0].id, "api-mem-1");
+    // 命中必须携带 match 元数据：MCP recall_memory 工具的输出 Schema 要求该字段，
+    // 缺失时 SDK 服务端校验会整条拒绝（曾经的真实缺陷，非空命中必炸）
+    assert.equal(recall.items[0].match.strategy, "lexical");
+    assert.ok(recall.items[0].match.matchedTerms.length > 0);
 
     const listed = await post(`${base}/v1/memories/list`, { scope }, accessKey);
     assert.equal(listed.items.length, 1);
