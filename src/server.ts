@@ -26,7 +26,9 @@ if (!accessKey?.trim()) {
 }
 
 mkdirSync(dirname(databasePath), { recursive: true });
-const repository = new SqliteRepository(databasePath);
+// 迁移启动前自动备份（Task 17）：有待应用迁移时先留 VACUUM 快照再升级，全新库自动跳过
+const migrationBackupDir = process.env.MEMORY_SKILLS_BACKUP_DIR?.trim() || "data/backups";
+const repository = new SqliteRepository(databasePath, { migrationBackupDir });
 // Access Key 作为禁止值注入事件输出：任何事件序列化结果命中它都会被脱敏
 const eventSink = resolveEventSinkFromEnv(process.env, { forbiddenValues: [accessKey] });
 

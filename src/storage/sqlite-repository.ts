@@ -6,144 +6,25 @@ import type { FeedbackRecord } from "../feedback/types.js";
 import type { Evidence, MemoryAsset, MemoryLayer } from "../memory/types.js";
 import type { SkillDocument, SkillVersionRecord } from "../skills/types.js";
 import type { SkillRunRecord } from "../skills/skill-run-record.js";
+import { runMigrations } from "./migration-runner.js";
 
 type DbRow = Record<string, unknown>;
 
 export class SqliteRepository {
   private readonly db: DatabaseSync;
 
-  constructor(path: string) {
+  constructor(path: string, options: { migrationBackupDir?: string } = {}) {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
-    this.migrate();
+    // Schema 由版本化迁移统一管理（Task 17）：旧库自动基线识别后补增量，全新库从 001 建起；
+    // 给出备份目录时，应用迁移前先留 VACUUM 快照（全新库无数据可丢，自动跳过）
+    runMigrations(this.db, options.migrationBackupDir === undefined
+      ? {}
+      : { backupDir: options.migrationBackupDir });
   }
 
   close(): void {
     this.db.close();
-  }
-
-  private migrate(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS evidence (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        team_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL,
-        session_id TEXT,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        captured_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS memory_assets (
-        id TEXT PRIMARY KEY,
-        layer TEXT NOT NULL CHECK(layer IN ('l1','l2','l3')),
-        user_id TEXT NOT NULL,
-        team_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL,
-        session_id TEXT,
-        content TEXT NOT NULL,
-        governance_json TEXT NOT NULL,
-        sources_json TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS memory_evidence (
-        memory_id TEXT NOT NULL REFERENCES memory_assets(id) ON DELETE CASCADE,
-        evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
-        PRIMARY KEY(memory_id, evidence_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS skills (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        team_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL,
-        session_id TEXT,
-        name TEXT NOT NULL,
-        description TEXT NOT NULL,
-        current_version INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        sources_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS skill_versions (
-        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-        version INTEGER NOT NULL,
-        content TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        status TEXT,
-        PRIMARY KEY(skill_id, version)
-      );
-
-      CREATE UNIQUE INDEX IF NOT EXISTS skills_scope_name
-      ON skills(user_id, team_id, agent_id, IFNULL(session_id, ''), name);
-
-      CREATE TABLE IF NOT EXISTS skill_evidence (
-        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-        evidence_id TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
-        PRIMARY KEY(skill_id, evidence_id)
-      );
-
-      -- 显式反馈表：刻意不加指向资产表的外键——资产被归档或删除后
-      -- 反馈记录仍需保留，作为评测样本与治理建议的历史依据
-      CREATE TABLE IF NOT EXISTS feedback (
-        id TEXT PRIMARY KEY,
-        asset_kind TEXT NOT NULL CHECK(asset_kind IN ('memory','skill')),
-        asset_id TEXT NOT NULL,
-        asset_version TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('useful','irrelevant','incorrect','outdated')),
-        user_id TEXT NOT NULL,
-        team_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL,
-        session_id TEXT,
-        request_id TEXT,
-        comment TEXT,
-        created_at TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS feedback_scope_time
-      ON feedback(user_id, team_id, agent_id, IFNULL(session_id, ''), created_at DESC);
-
-      -- Skill 使用记录：与 feedback 一样刻意不加指向资产表的外键，
-      -- 资产归档后使用证据仍保留，作为"是否有效"的历史依据
-      CREATE TABLE IF NOT EXISTS skill_runs (
-        id TEXT PRIMARY KEY,
-        skill_id TEXT NOT NULL,
-        skill_version INTEGER NOT NULL,
-        user_id TEXT NOT NULL,
-        team_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL,
-        session_id TEXT,
-        event TEXT NOT NULL CHECK(event IN ('recalled','adopted','succeeded','failed')),
-        request_id TEXT,
-        note TEXT,
-        created_at TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS skill_runs_scope_time
-      ON skill_runs(user_id, team_id, agent_id, IFNULL(session_id, ''), created_at DESC);
-
-      CREATE INDEX IF NOT EXISTS skill_runs_skill_time
-      ON skill_runs(skill_id, created_at DESC);
-    `);
-
-    // 旧库升级：skill_versions 在 v0.6 之前没有 status 列（版本治理状态快照）。
-    // 新列允许为空——历史版本的状态已不可考，只有当前版本用 skills.status 回填。
-    this.ensureColumn("skill_versions", "status", "TEXT", `
-      UPDATE skill_versions
-      SET status = (SELECT s.status FROM skills s WHERE s.id = skill_versions.skill_id)
-      WHERE version = (SELECT s.current_version FROM skills s WHERE s.id = skill_versions.skill_id)
-    `);
-  }
-
-  /** 幂等加列：旧库升级用；backfill 在列新建成时执行一次。 */
-  private ensureColumn(table: string, column: string, definition: string, backfillSql?: string): void {
-    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    if (columns.some((row) => row.name === column)) return;
-    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-    if (backfillSql) this.db.exec(backfillSql);
   }
 
   captureEvidence(evidence: Evidence): Evidence {
