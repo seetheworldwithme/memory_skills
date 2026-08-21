@@ -25,7 +25,7 @@ ContextService
 
 - 词法分 = `lexicalScore(query, text) * weight`（记忆的 weight 为 governance.confidence，Skill 为 1；与词法路径完全一致）；
 - 向量分 = `max(0, 余弦相似度)`；
-- 通道激活：词法分 > 0，或 余弦 ≥ `minVectorCosine`（默认 0.2）；
+- 通道激活：词法分 > 0，或 余弦 ≥ `minVectorCosine`（默认 0.5，模型相关，见下文评测数据）；
 - **融合分 = 激活通道的加权平均** `Σ(w·s) / Σ(w)`，而不是固定权重和。
 
 "激活通道归一化"是关键设计：向量通道未激活（含 Mock 零向量、阈值未达、索引为空）时，融合分退化为纯词法分，因此混合管线在不产生语义增益的情况下与词法路径**逐位一致**——这是离线无回归证明的基础。排序为融合分降序 + 稳定排序（保持文档枚举顺序，与词法基线的排序语义一致）。
@@ -88,22 +88,26 @@ curl -X POST "$MEMORY_SKILLS_URL/v1/retrieval/sync" \
 - `npm run eval:retrieval`——词法路径的基线门禁（基线 `evals/baselines/context-recall.v0.3.json`，含语义改写用例 zh-057~059 / en-023，词法对它们零命中）；
 - `npm run eval:retrieval -- --hybrid`——Mock 零向量走完整混合管线，断言与词法路径逐用例一致，证明接入本身零回归。
 
-**真实模型测量（`MEMORY_SKILLS_SMOKE=1 npm run smoke:retrieval-hybrid`）：**
+**真实模型测量（`MEMORY_SKILLS_SMOKE=1 npm run smoke:retrieval-hybrid`，或网格扫描脚本调参）：**
 
-用 OpenAI 兼容中转端点对两份评测夹具做参数网格扫描（阈值 × 权重），结论：
+用 OpenAI 兼容端点对两份评测夹具做参数网格扫描（阈值 × 权重），已对比三个配置（2026-08-20/21 同一评测集、同一扫描口径）：
 
-| 模型 | 零退化所需 minCos | 该点的收益 | 语义改写命中 |
-| --- | --- | --- | --- |
-| text-embedding-3-small | ≈0.60 | 12 用例改善，聚合 Recall +0.098 | 0/4（收益被阈值吃掉） |
-| text-embedding-3-large | 0.50 | 22 用例改善，聚合 Recall +0.205 / MRR +0.213 / Precision +0.013，禁止命中增量 0 | 3/4（zh-057~059 全中） |
+| 配置 | 零退化点 | 该点收益 | 语义改写命中 | 嵌入速度 |
+| --- | --- | --- | --- | --- |
+| text-embedding-3-small（xiaoai.plus 中转） | ≈0.60 | 12 用例改善，ΔRecall +0.098 | 0/4 | 中 |
+| **text-embedding-3-large（xiaoai.plus 中转，当前投产）** | **0.50** | **22 用例改善，ΔRecall +0.205 / ΔMRR +0.213 / ΔPrecision +0.013，禁止命中增量 0** | **3/4（zh 全中）** | 慢（批量 219ms/条，单次查询经中转偶发数秒） |
+| BAAI/bge-m3（SiliconFlow 直连） | 0.70 | 13 用例改善，ΔRecall +0.114 / ΔMRR +0.146 / ΔPrecision +0.009，禁止命中增量 0 | 2/4 | **快（批量 16ms/条，约 13 倍速差）** |
+
+bge-m3 补充实验：官方检索指令前缀（`Represent this sentence for searching relevant passages: `）**无净收益**——零退化点收益降至 11 用例（precision 变正但召回增益缩水），不采用。
 
 关键发现：
 
-1. **权重不是主导参数**（1:1 与 3:1 差异在噪声内），阈值才是——small 模型对中文的余弦各向异性严重（无关对普遍 0.3~0.55，与改写对 0.5~0.6 区间重叠），没有全局阈值能同时挡住无关对、放进改写对；large 的判别力显著更强。
+1. **权重不是主导参数**（1:1 与 3:1 差异在噪声内），阈值才是——small 与 bge-m3 对中文的余弦各向异性都严重（无关对与改写对区间重叠），没有全局阈值能同时挡住无关对、放进改写对；large 的判别力显著更强。
 2. **均值中心化（余弦减候选集背景均值）未能根治**，只把可用点略微提前。
 3. 残余的边界模糊用例（如"怎么提高英语阅读速度" vs 阅读器资产、"日历软件推荐" vs 自家日历 App）属于"话题相近但事实无关"，需要 Reranker（Task 11）或更强的模型判别，不是阈值能解决的。
+4. **判别力与速度的反向权衡**：large 零退化收益约为 bge-m3 的两倍、语义改写多命中一条；bge-m3 快约 13 倍且直连更稳定。当前按"召回质量优先"投产 large + 阈值 0.5。
 
-**推荐配置**（已写入本地 `.env`，`text-embedding-3-large` + `MEMORY_SKILLS_HYBRID_MIN_COSINE=0.5`）在评测集上满足启用门槛：显著提升且禁止命中零退化。注意 large 经中转的延迟明显高于 small（单次可达数十秒级偶尔超时，建议配 `MEMORY_SKILLS_EMBEDDING_TIMEOUT_MS=60000`）；若更看重延迟可回退 small + 阈值 0.6，收益缩小但仍然为正。换任何新模型后应先重跑 smoke 扫描再调阈值。
+**推荐配置**（已写入本地 `.env`，`text-embedding-3-large` + `MEMORY_SKILLS_HYBRID_MIN_COSINE=0.5`）在评测集上满足启用门槛：显著提升且禁止命中零退化。注意 large 经中转的延迟明显（建议配 `MEMORY_SKILLS_EMBEDDING_TIMEOUT_MS=60000`）；若延迟成为主要矛盾，可切换 bge-m3 + 阈值 0.70（收益缩小但仍为正，`.env` 中留有注释配置）。**换任何 Embedding 模型时必须三件事一起做：改模型配置、按新模型重调阈值、重跑 `/v1/retrieval/sync`——只换模型不调阈值会立即进入大量误召回状态。**
 
 ## Mock 零向量的取舍
 
