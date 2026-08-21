@@ -1,0 +1,34 @@
+# Codex CLI 的 memory-skills MCP 接入模板（Task 5）。
+#
+# 重要（已按 codex-cli 0.39.0 实测校准）：
+#   1. Codex 只读取用户级 ~/.codex/config.toml，不读取项目内 .codex/config.toml；
+#      本文件是模板，用文件末尾的 codex mcp add 命令注册，或把 [mcp_servers.memory-skills]
+#      段合并进 ~/.codex/config.toml（路径替换为本机绝对路径）。
+#   2. Codex 从任意目录启动，command 与 args 必须用绝对路径。
+#   3. 实测 Codex 0.39.0 不向 MCP 子进程继承宿主 shell 环境变量：即使启动前
+#      export MEMORY_SKILLS_ACCESS_KEY，子进程也拿不到。因此这里用 node 的
+#      --env-file-if-exists 让 server 进程直接从项目 .env 加载密钥；
+#      密钥仍然只存在于 .env（不入库），config.toml 中只有文件路径引用，无密钥明文。
+#   4. TOML 不支持 ${VAR} 展开；node --env-file 不会覆盖已存在的环境变量，
+#      所以 env 表中的 URL 等显式配置优先级高于 .env。
+#   5. 配置文件中一律不写 Access Key。
+#
+# 正式接入文档见 docs/integrations/codex.md。
+
+[mcp_servers.memory-skills]
+command = "node"
+args = [
+  "--env-file-if-exists=/absolute/path/to/memory_skills/.env",
+  "/absolute/path/to/memory_skills/dist/adapters/mcp/server.js",
+]
+env = { MEMORY_SKILLS_URL = "http://127.0.0.1:8421", MEMORY_SKILLS_USER_ID = "local-admin", MEMORY_SKILLS_TEAM_ID = "local", MEMORY_SKILLS_AGENT_ID = "default" }
+
+# 等价的一键注册（在 memory_skills 项目根目录执行，自动写入绝对路径）：
+#   codex mcp add memory-skills \
+#     --env MEMORY_SKILLS_URL=http://127.0.0.1:8421 \
+#     --env MEMORY_SKILLS_USER_ID=local-admin \
+#     --env MEMORY_SKILLS_TEAM_ID=local \
+#     --env MEMORY_SKILLS_AGENT_ID=default \
+#     -- node --env-file-if-exists="$PWD/.env" "$PWD/dist/adapters/mcp/server.js"
+#
+# 移除：codex mcp remove memory-skills

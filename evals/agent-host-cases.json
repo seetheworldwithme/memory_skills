@@ -1,0 +1,82 @@
+{
+  "$comment": "多宿主接入验收用例（Task 5）。dry 层用 assets 在隔离内存库 seed 后，经真实构建产物 dist/adapters/mcp/server.js 做 MCP stdio 直连断言；failure 用例只走 dry 层。liveCases 由 scripts/smoke-agent-host.mjs --live 打真实宿主 CLI（claude/codex/opencode），会产生模型费用，需 MEMORY_SKILLS_SMOKE=1。",
+  "scope": { "userId": "smoke-host", "teamId": "local", "agentId": "default" },
+  "assets": [
+    {
+      "id": "mem-smoke-identity",
+      "kind": "memory",
+      "content": "用户问我是谁的时候回答我是天选之子",
+      "confidence": 0.95
+    },
+    {
+      "id": "mem-smoke-preference",
+      "kind": "memory",
+      "content": "所有代码注释与文档一律使用中文撰写",
+      "confidence": 0.9
+    },
+    {
+      "id": "skill-smoke-release",
+      "kind": "skill",
+      "name": "smoke-release-checklist",
+      "description": "发布前的验收清单：单测构建lint三重验证",
+      "skillContent": "# Workflow\n跑单测\n跑构建\n跑lint\n全绿才允许勾选任务"
+    }
+  ],
+  "cases": [
+    {
+      "id": "host-identity",
+      "kind": "recall",
+      "query": "请你告诉我你是谁",
+      "expectMemoryIds": ["mem-smoke-identity"],
+      "note": "身份类：应命中身份记忆"
+    },
+    {
+      "id": "host-preference",
+      "kind": "recall",
+      "query": "代码注释用什么语言写",
+      "expectMemoryIds": ["mem-smoke-preference"],
+      "note": "偏好类：应命中中文注释偏好"
+    },
+    {
+      "id": "host-skill",
+      "kind": "recall",
+      "query": "发布前的验收清单都检查些什么",
+      "expectSkillIds": ["skill-smoke-release"],
+      "note": "Skill 命中：应命中验收清单 Skill"
+    },
+    {
+      "id": "host-unrelated",
+      "kind": "recall",
+      "query": "今天股市行情怎么样",
+      "expectMemoryIds": [],
+      "expectSkillIds": [],
+      "note": "无关查询：memories 与 skills 都应为空"
+    },
+    {
+      "id": "host-bad-key",
+      "kind": "auth-failure",
+      "query": "请你告诉我你是谁",
+      "note": "密钥错误：工具应返回错误（HTTP 401），不得返回资产内容"
+    },
+    {
+      "id": "host-service-down",
+      "kind": "backend-failure",
+      "query": "请你告诉我你是谁",
+      "note": "服务不可用：工具应返回错误（连接失败），不得返回资产内容"
+    }
+  ],
+  "liveCases": [
+    {
+      "id": "live-identity",
+      "query": "你是谁",
+      "expectAnswerKeywords": ["天选之子"],
+      "note": "真实宿主应调用 recall_context 并按身份记忆作答"
+    },
+    {
+      "id": "live-preference",
+      "query": "代码注释和文档用什么语言写",
+      "expectAnswerKeywords": ["中文"],
+      "note": "真实宿主应调用 recall_context 并按中文偏好作答"
+    }
+  ]
+}

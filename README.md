@@ -48,7 +48,13 @@ The first web milestone uses one local administrator scope
 (`local-admin/local/default`). It deliberately does not include registration,
 multiple users, teams, password recovery, or role-based authorization.
 
-## Claude Code MCP
+## Agent 宿主 MCP 接入（Claude Code / Codex / OpenCode）
+
+三个宿主复用同一个只读 MCP 构建产物 `dist/adapters/mcp/server.js`，宿主侧只有
+启动配置，密钥一律不进配置文件。各宿主的接入步骤与实测校准的版本差异见
+`docs/integrations/`（`claude-code.md`、`codex.md`、`opencode.md`）。
+
+### Claude Code
 
 Build and start the API, then launch Claude Code from this project with the
 same access key in its environment:
@@ -57,18 +63,19 @@ same access key in its environment:
 npm run build
 MEMORY_SKILLS_ACCESS_KEY='replace-with-your-key' npm start
 
-export MEMORY_SKILLS_URL='http://127.0.0.1:8421'
 export MEMORY_SKILLS_ACCESS_KEY='replace-with-your-key'
 claude
 ```
 
-The project-level `.mcp.json` starts `dist/adapters/mcp/server.js`. Use `/mcp`
+The project-level `.mcp.json` starts `dist/adapters/mcp/server.js`（密钥以
+`${MEMORY_SKILLS_ACCESS_KEY}` 引用，值来自 shell 环境）. Use `/mcp`
 inside Claude Code to approve and inspect the `memory-skills` server. The
 adapter exposes four read-only tools: `recall_context`, `recall_memory`,
-`search_skills`, and `get_skill`. `CLAUDE.md` tells Claude when to use the
-unified tool; `.claude/settings.json` pre-authorizes only that unified read-only
-tool. The adapter binds all calls to its configured scope and never exposes
-Draft content. Retrieval and governance rules remain in the core service.
+`search_skills`, and `get_skill`. `CLAUDE.md`/`AGENTS.md` tell the agent when
+to use the unified tool; `.claude/settings.json` pre-authorizes only that
+unified read-only tool. The adapter binds all calls to its configured scope
+and never exposes Draft content. Retrieval and governance rules remain in the
+core service.
 
 For a private machine-specific registration instead of `.mcp.json`, run:
 
@@ -78,6 +85,47 @@ claude mcp add memory-skills --scope local \
   --env MEMORY_SKILLS_ACCESS_KEY="$MEMORY_SKILLS_ACCESS_KEY" \
   -- node "$PWD/dist/adapters/mcp/server.js"
 ```
+
+### Codex（用户级配置）
+
+Codex 0.39.0 只读用户级 `~/.codex/config.toml`，且不向 MCP 子进程继承宿主
+shell 环境，注册时用 `node --env-file` 让 server 直接从项目 `.env` 取密钥：
+
+```bash
+codex mcp add memory-skills \
+  --env MEMORY_SKILLS_URL=http://127.0.0.1:8421 \
+  --env MEMORY_SKILLS_USER_ID=local-admin \
+  --env MEMORY_SKILLS_TEAM_ID=local \
+  --env MEMORY_SKILLS_AGENT_ID=default \
+  -- node --env-file-if-exists="$PWD/.env" "$PWD/dist/adapters/mcp/server.js"
+```
+
+模板见 `.codex/config.toml.example`，调用策略读项目 `AGENTS.md`。
+
+### OpenCode（项目级配置）
+
+复制 `opencode.json.example` 为项目根的 `opencode.json`（真实配置不入库），
+OpenCode 的 MCP 子进程继承宿主环境，启动前 `export
+MEMORY_SKILLS_ACCESS_KEY` 即可：
+
+```bash
+cp opencode.json.example opencode.json
+export MEMORY_SKILLS_ACCESS_KEY='replace-with-your-key'
+opencode mcp list   # 应显示 memory-skills connected
+```
+
+### 多宿主验收
+
+```bash
+npm run smoke:agent-host                                  # dry：零费用，9 项断言
+MEMORY_SKILLS_SMOKE=1 npm run smoke:agent-host -- --live   # live：真实宿主 CLI（产生模型费用）
+```
+
+dry 层覆盖身份/偏好/Skill 命中/无关查询不命中/密钥错误/服务不可用六类用例
+与三宿主配置漂移检测；live 层断言真实宿主调用 `recall_context`（服务端
+`context.recall.completed` 事件）且最终答案包含期望资产关键词。Pi 的能力
+探测与适配决策见 `docs/spikes/pi-integration-decision.md`（`npm run
+detect:pi` 复核）。
 
 ## SessionEnd 半自动捕获（Evidence 层）
 

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "$comment": "OpenCode 的 memory-skills MCP 接入模板（Task 5）。复制为本项目根目录的 opencode.json（真实配置不入库）。已按 opencode 1.1.50 实测校准：项目级 opencode.json 的 mcp 段会被读取，command 数组中的相对路径按项目根解析，MCP 子进程继承 OpenCode 进程环境变量，因此 environment 只写非敏感变量，MEMORY_SKILLS_ACCESS_KEY 从启动 shell 导出（与 .env 相同值），配置文件中一律不写 Access Key。接入文档见 docs/integrations/opencode.md。",
+  "mcp": {
+    "memory-skills": {
+      "type": "local",
+      "command": ["node", "dist/adapters/mcp/server.js"],
+      "environment": {
+        "MEMORY_SKILLS_URL": "http://127.0.0.1:8421",
+        "MEMORY_SKILLS_USER_ID": "local-admin",
+        "MEMORY_SKILLS_TEAM_ID": "local",
+        "MEMORY_SKILLS_AGENT_ID": "default"
+      },
+      "enabled": true
+    }
+  }
+}

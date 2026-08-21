@@ -7,3 +7,7 @@ data/
 .env
 .claude/settings.local.json
 .DS_Store
+
+# 多宿主接入的真实本地配置（模板 example 入库，真实配置含本机路径/环境引用不入库）
+.codex/config.toml
+opencode.json
