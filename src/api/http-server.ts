@@ -66,6 +66,9 @@ export function createMemorySkillsServer(options: {
     ...(options.eventSink === undefined ? {} : { eventSink: options.eventSink }),
   }, {
     ...(options.retriever === undefined ? {} : { retriever: options.retriever }),
+  }, {
+    // 召回日志：requestId → 查询/命中资产 的本地持久化，供反馈回流与采用率统计
+    repository: options.repository,
   });
   const proposals = options.llmProvider
     ? new ProposalService({ memory, skills, repository: options.repository, provider: options.llmProvider })
@@ -611,6 +614,36 @@ async function route(
       return;
     }
     send(response, 200, { items: feedback.list(body.scope) });
+    return;
+  }
+
+  // 召回日志（只读）：requestId → 查询/命中资产的持久化关联，供反馈回流评测集
+  // 与采用率统计。含查询原文，属于治理层数据，只对具备审核能力的角色开放
+  if (method === "POST" && url.pathname === "/v1/recall-log/list") {
+    const body = await readJson(request) as { scope: Scope };
+    if (!authorize(principal!, "review", body.scope, url.pathname, response, security)) return;
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    send(response, 200, { items: repository.listRecallLog(body.scope) });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/recall-log/get") {
+    const body = await readJson(request) as { requestId?: string };
+    if (!body.requestId || typeof body.requestId !== "string") {
+      send(response, 400, { error: "BAD_REQUEST", message: "requestId is required" });
+      return;
+    }
+    const record = repository.getRecallLog(body.requestId);
+    if (!record) {
+      send(response, 404, { error: "NOT_FOUND", message: `recall log not found: ${body.requestId}` });
+      return;
+    }
+    // 作用域来自日志记录本身（请求体不再是 Scope 权威来源）
+    if (!authorize(principal!, "review", record.scope, url.pathname, response, security)) return;
+    send(response, 200, record);
     return;
   }
 

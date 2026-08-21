@@ -39,6 +39,7 @@
     "detect:pi": "node scripts/detect-pi-capabilities.mjs",
     "review:drafts": "node --env-file-if-exists=.env scripts/review-drafts.mjs",
     "governance:sweep": "node --env-file-if-exists=.env scripts/governance-sweep.mjs",
+    "feedback:reflow": "node --env-file-if-exists=.env scripts/feedback-to-eval.mjs",
     "backup": "node scripts/backup.mjs",
     "restore": "node --import tsx scripts/restore.mjs",
     "start": "node --env-file-if-exists=.env dist/server.js",

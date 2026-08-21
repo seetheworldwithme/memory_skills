@@ -17,8 +17,10 @@ import {
   errorCodeFor,
   type ContextRecallCompletedEvent,
   type ContextRecallFailedEvent,
+  type RecallLogFailedEvent,
 } from "../observability/events.js";
-import type { ContextRecallInput } from "./types.js";
+import type { ContextRecallInput, RecallLogHit, RecallLogRecord } from "./types.js";
+import type { SqliteRepository } from "../storage/sqlite-repository.js";
 import {
   CONTRACT_VERSION,
   type ContractWarning,
@@ -40,11 +42,17 @@ export interface ContextRetrievalOptions {
   retriever?: Retriever;
 }
 
+/** 召回日志注入项：注入 repository 后每次成功召回落一行 recall_log。 */
+export interface ContextRecallLogOptions {
+  repository?: SqliteRepository;
+}
+
 export class ContextService {
   private readonly eventSink: EventSink | undefined;
   private readonly now: () => number;
   private readonly retriever: Retriever;
   private readonly newRequestId: () => string;
+  private readonly recallLogRepository: SqliteRepository | undefined;
 
   constructor(
     private readonly memory: MemoryService,
@@ -52,11 +60,13 @@ export class ContextService {
     newRequestId: () => string = randomUUID,
     observability: ContextObservability = {},
     retrieval: ContextRetrievalOptions = {},
+    recallLog: ContextRecallLogOptions = {},
   ) {
     this.eventSink = observability.eventSink;
     this.now = observability.now ?? (() => performance.now());
     this.retriever = retrieval.retriever ?? new LexicalRetriever();
     this.newRequestId = newRequestId;
+    this.recallLogRepository = recallLog.repository;
   }
 
   /**
@@ -70,6 +80,7 @@ export class ContextService {
     try {
       const { response, memoryCandidates, skillCandidates } = await this.recallInternal(input, requestId);
       this.emitCompleted(input, response, memoryCandidates, skillCandidates, startedAt);
+      this.writeRecallLog(input, response, startedAt);
       return response;
     } catch (error) {
       this.emitFailed(input, requestId, startedAt, error);
@@ -201,6 +212,47 @@ export class ContextService {
       memoryCandidates: rankedMemories.length,
       skillCandidates: rankedSkills.length,
     };
+  }
+
+  /**
+   * 写召回日志：requestId → 查询/命中资产/分数的持久化关联，
+   * 服务于反馈回流评测集与采用率统计。写入失败只记 `recall.log.failed`
+   * 事件，绝不影响召回主流程（遥测不是召回的依赖）。
+   */
+  private writeRecallLog(input: ContextRecallInput, response: ContextRecallResponse, startedAt: number): void {
+    if (!this.recallLogRepository) return;
+    const memoryHits: RecallLogHit[] = response.memories.map((memory) => ({
+      id: memory.id,
+      score: memory.match.score,
+    }));
+    const skillHits: RecallLogHit[] = response.skills.map((skill) => ({
+      id: skill.id,
+      score: skill.match.score,
+    }));
+    const record: RecallLogRecord = {
+      requestId: response.requestId,
+      query: input.query,
+      scope: input.scope,
+      retrievalStrategy: this.retriever.strategy,
+      memoryHits,
+      skillHits,
+      durationMs: roundDuration(this.now() - startedAt),
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      this.recallLogRepository.insertRecallLog(record);
+    } catch (error) {
+      if (!this.eventSink) return;
+      const event: RecallLogFailedEvent = {
+        schemaVersion: EVENT_SCHEMA_VERSION,
+        eventType: "recall.log.failed",
+        timestamp: new Date().toISOString(),
+        requestId: record.requestId,
+        errorCode: errorCodeFor(error),
+        errorName: error instanceof Error ? error.name : "UnknownError",
+      };
+      this.eventSink.emit(event);
+    }
   }
 
   /** 召回成功事件：只携带计数、预算、策略与耗时，不携带任何正文。 */

@@ -11,6 +11,7 @@ export type ObservabilityEventType =
   | "service.started"
   | "context.recall.completed"
   | "context.recall.failed"
+  | "recall.log.failed"
   | "retrieval.auto_sync.completed"
   | "retrieval.auto_sync.failed"
   | "event.redacted"
@@ -58,6 +59,17 @@ export interface ContextRecallCompletedEvent extends EventEnvelope {
   truncated: boolean;
   warningCodes: WarningCode[];
   matchStrategies: string[];
+}
+
+/**
+ * 召回日志写入失败事件：recall_log 落库失败只记错误码与错误名，
+ * 绝不影响召回主流程（日志是遥测，不是召回的依赖）。
+ */
+export interface RecallLogFailedEvent extends EventEnvelope {
+  eventType: "recall.log.failed";
+  requestId: string;
+  errorCode: string;
+  errorName: string;
 }
 
 /** 召回失败事件：只记录错误码与错误名，不记录可能拼接用户内容的错误消息。 */
@@ -164,6 +176,7 @@ export type ObservabilityEvent =
   | ServiceStartedEvent
   | ContextRecallCompletedEvent
   | ContextRecallFailedEvent
+  | RecallLogFailedEvent
   | RetrievalAutoSyncCompletedEvent
   | RetrievalAutoSyncFailedEvent
   | EventRedactedEvent
@@ -187,6 +200,7 @@ const FIELD_ALLOWLIST: Record<ObservabilityEventType, readonly string[]> = {
     "truncated", "warningCodes", "matchStrategies",
   ],
   "context.recall.failed": ["requestId", "scope", "durationMs", "queryChars", "errorCode", "errorName"],
+  "recall.log.failed": ["requestId", "errorCode", "errorName"],
   "retrieval.auto_sync.completed": ["trigger", "assetKind", "assetId", "scope", "embedded", "removed"],
   "retrieval.auto_sync.failed": ["trigger", "assetKind", "assetId", "scope", "errorCode", "errorName"],
   "event.redacted": ["originalEventType", "reason"],

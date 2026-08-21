@@ -15,3 +15,6 @@ following upstream areas informed the new modules.
 
 The original Tencent copyright and MIT license are retained in `LICENSE`.
 
+2026-08-21 对上游做了一次全面设计对照，借鉴与不抄的结论见
+[上游借鉴结论](./analysis/upstream-borrowing-2026-08-21.md)。
+

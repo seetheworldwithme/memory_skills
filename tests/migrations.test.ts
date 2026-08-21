@@ -63,6 +63,7 @@ test("全新库：从零应用全部迁移，结构与旧版内联建库一致",
   assert.deepEqual(report.applied.map(({ id, name }) => [id, name]), [
     [1, "core-tables"], [2, "feedback"], [3, "skill-runs"], [4, "skill-version-status"],
     [5, "evidence-origin-session"],
+    [6, "recall-log"],
   ]);
   assert.equal(report.baselineDetected, null);
   assert.equal(report.versionAfter, MIGRATIONS.length);
@@ -80,7 +81,7 @@ test("跨版本升级（历史 fixture 一：v0.2 核心库）：增量应用且
   // v0.2 库 = 只有 001 核心表
   const db = buildLegacyDatabase([1], seedCoreData);
   const report = runMigrations(db);
-  assert.deepEqual(report.applied.map(({ id }) => id), [2, 3, 4, 5]);
+  assert.deepEqual(report.applied.map(({ id }) => id), [2, 3, 4, 5, 6]);
   assert.equal(currentSchemaVersion(db), MIGRATIONS.length);
 
   // 004 回填：当前版本（v2）拿到 skills.status，历史版本（v1）状态不可考为 NULL
@@ -106,7 +107,7 @@ test("跨版本升级（历史 fixture 二：v0.5 反馈库）：只补 003/004"
     `).run();
   });
   const report = runMigrations(db);
-  assert.deepEqual(report.applied.map(({ id }) => id), [3, 4, 5]);
+  assert.deepEqual(report.applied.map(({ id }) => id), [3, 4, 5, 6]);
 
   // 反馈数据跨升级保留
   assert.equal(db.prepare("SELECT count(*) AS c FROM feedback").get()?.c, 1);
@@ -120,8 +121,8 @@ test("旧版内联建库（无 schema_migrations）：结构指纹识别基线�
 
   const report = runMigrations(db);
   assert.equal(report.baselineDetected, 4);
-  // 基线识别为 v4：001-004 只登记不重放；基线之后的 005 正常增量应用
-  assert.deepEqual(report.applied.map(({ id }) => id), [5]);
+  // 基线识别为 v4：001-004 只登记不重放；基线之后的 005/006 正常增量应用
+  assert.deepEqual(report.applied.map(({ id }) => id), [5, 6]);
   assert.equal(currentSchemaVersion(db), MIGRATIONS.length);
   const hasOriginSession = db.prepare("PRAGMA table_info(evidence)").all()
     .some((column) => column.name === "origin_session_id");

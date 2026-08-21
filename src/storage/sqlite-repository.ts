@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { GovernedStatus } from "../governance/lifecycle.js";
 import type { GovernanceMetadata, Scope, SourceReference } from "../governance/types.js";
 import type { FeedbackRecord } from "../feedback/types.js";
+import type { RecallLogHit, RecallLogRecord } from "../context/types.js";
 import type { Evidence, MemoryAsset, MemoryLayer } from "../memory/types.js";
 import type { SkillDocument, SkillVersionRecord } from "../skills/types.js";
 import type { SkillRunRecord } from "../skills/skill-run-record.js";
@@ -453,6 +454,66 @@ export class SqliteRepository {
       .run(JSON.stringify(asset.governance), id);
     return asset;
   }
+
+  /** 落库一条召回日志：requestId 冲突由主键约束抛错（同一请求不应重复写）。 */
+  insertRecallLog(record: RecallLogRecord): RecallLogRecord {
+    this.db.prepare(`
+      INSERT INTO recall_log
+      (request_id,query,user_id,team_id,agent_id,session_id,retrieval_strategy,memory_hits,skill_hits,duration_ms,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      record.requestId,
+      record.query,
+      record.scope.userId,
+      record.scope.teamId,
+      record.scope.agentId,
+      record.scope.sessionId ?? null,
+      record.retrievalStrategy ?? null,
+      JSON.stringify(record.memoryHits),
+      JSON.stringify(record.skillHits),
+      record.durationMs ?? null,
+      record.createdAt,
+    );
+    return record;
+  }
+
+  /** 按 requestId 精确取一条召回日志（反馈回流时反查查询与命中资产）。 */
+  getRecallLog(requestId: string): RecallLogRecord | undefined {
+    const row = this.db.prepare(
+      "SELECT * FROM recall_log WHERE request_id = ?",
+    ).get(requestId) as DbRow | undefined;
+    return row ? rowToRecallLog(row) : undefined;
+  }
+
+  /** 按作用域列出召回日志，时间倒序（采用率统计用）。 */
+  listRecallLog(scope: Scope): RecallLogRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM recall_log
+      WHERE user_id = ? AND team_id = ? AND agent_id = ?
+      AND session_id IS ?
+      ORDER BY created_at DESC, request_id DESC
+    `).all(scope.userId, scope.teamId, scope.agentId, scope.sessionId ?? null) as DbRow[];
+    return rows.map(rowToRecallLog);
+  }
+}
+
+/** 数据库行 → 召回日志记录：JSON 命中明细还原为结构化数组。 */
+function rowToRecallLog(row: DbRow): RecallLogRecord {
+  return {
+    requestId: String(row.request_id),
+    query: String(row.query),
+    scope: {
+      userId: String(row.user_id),
+      teamId: String(row.team_id),
+      agentId: String(row.agent_id),
+      ...(row.session_id ? { sessionId: String(row.session_id) } : {}),
+    },
+    ...(row.retrieval_strategy ? { retrievalStrategy: String(row.retrieval_strategy) } : {}),
+    memoryHits: JSON.parse(String(row.memory_hits)) as RecallLogHit[],
+    skillHits: JSON.parse(String(row.skill_hits)) as RecallLogHit[],
+    ...(row.duration_ms == null ? {} : { durationMs: Number(row.duration_ms) }),
+    createdAt: String(row.created_at),
+  };
 }
 
 function rowToEvidence(row: DbRow): Evidence {

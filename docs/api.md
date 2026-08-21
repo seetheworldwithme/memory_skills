@@ -287,6 +287,34 @@ POST /v1/feedback/list
 
 返回 `{ "items": [FeedbackRecord] }`，按创建时间倒序，仅含该作用域内的反馈。
 
+## List recall log（召回日志，只读）
+
+```http
+POST /v1/recall-log/list
+```
+
+```json
+{ "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" } }
+```
+
+返回 `{ "items": [RecallLogRecord] }`（时间倒序）。每次 `/v1/context/recall`
+成功召回后服务端落一行：requestId、查询原文、命中记忆/Skill 的 ID 与分数、
+检索策略与耗时。用于反馈回流评测集与采用率统计（`npm run feedback:reflow`），
+需要 review 角色。写入失败只记 `recall.log.failed` 事件，不影响召回本身。
+
+## Get recall log
+
+```http
+POST /v1/recall-log/get
+```
+
+```json
+{ "requestId": "0f6b2c1e-…" }
+```
+
+按 requestId 精确取一条召回日志；作用域授权基于日志记录自身的作用域
+（请求体不是 Scope 权威来源）。不存在返回 `404 NOT_FOUND`。
+
 ## Sync vector index（人工触发的向量索引同步）
 
 ```http

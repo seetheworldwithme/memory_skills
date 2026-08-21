@@ -89,3 +89,36 @@ header. Run `npm run eval:retrieval` — a new failing case does not fail the
 default gate (only baseline metrics and, under `--strict`, critical cases
 do), so additions are safe to land before the algorithm catches up; mark a
 case `critical` only when its failure blocks release.
+
+## Feedback reflow（反馈回流）
+
+真实失败样本回流评测集的运营闭环。每次通过 `/v1/context/recall` 的召回都会
+在服务端落一行 `recall_log`（requestId → 查询原文 / 命中资产与分数 / 策略 /
+耗时；仅存本地 SQLite，不进观测事件与 API 响应之外的任何通道）。Web 资产
+详情页或 Agent 提交的 incorrect/outdated 反馈带 requestId 时，即可还原当时
+的查询与命中现场。
+
+流程：
+
+1. `npm run feedback:reflow -- --export`：把 incorrect/outdated 反馈（可用
+   `--kinds=` 覆盖）join 召回日志，导出为
+   `evals/pending/context-recall.feedback-pending.jsonl`——文件结构与正式
+   fixture 同构（首行资产池 + 每行一个用例），`expectedIds` 留空待人工补全，
+   被反馈资产自动进 `forbiddenIds`；无 requestId 的反馈跳过并计数。
+2. 人工审查 pending 文件：脱敏真实对话内容、补全 `expectedIds`
+   （incorrect 的正确答案、outdated 的替代资产需要人判断）。
+3. 确认后把用例并入正式 fixture（zh-CN / en），按正常流程
+   `--save-baseline` 重生成基线，删除 pending 文件。
+4. pending 文件在 `npm run eval:retrieval` 中只回放展示
+   （`pending(lex)` 报告），不进 overall 聚合、不触发任何门禁；解析失败
+   （人工编辑中的半成品）提示后跳过，不会挂 CI。
+
+`npm run feedback:reflow -- --report` 输出采用率报告：召回总数、四类反馈
+分布、反馈覆盖率、采用率下界（有 useful 反馈且无 incorrect/irrelevant 反馈
+的召回占比，北极星「有效上下文采用率」的下界近似）与失败资产 Top-N。
+显式反馈只是抽样，真实采用率介于该下界与 1−失败率之间；Agent 侧采用信号
+接入后再收紧口径。
+
+原始数据端点（review 角色可读）：`POST /v1/recall-log/list`（按作用域列
+时间倒序）、`POST /v1/recall-log/get`（按 requestId 精确取，作用域来自日志
+记录本身）。

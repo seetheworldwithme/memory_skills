@@ -16,9 +16,12 @@
  * 退出码：门禁内为 0，任何失败为 1。
  * 标志：--save-baseline 重写基线文件；--verbose 打印每个用例的返回 ID；
  * --strict 启用发布硬门禁；--hybrid 附加混合管线一致性验证。
+ *
+ * pending 样本（fixtures/pending/*.jsonl，反馈回流导出）：只回放展示，
+ * 不进 overall 聚合、不触发基线与 strict 门禁；解析失败提示后跳过。
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +47,12 @@ const FIXTURES = [
   "fixtures/context-recall.zh-CN.jsonl",
   "fixtures/context-recall.en.jsonl",
 ] as const;
+/**
+ * pending 目录：反馈回流导出的待确认样本（scripts/feedback-to-eval.mjs --export）。
+ * 只做报告展示，绝不参与基线与 strict 门禁——人工脱敏补全并移入正式 fixture 后
+ * 才按正常流程重生成基线。
+ */
+const PENDING_DIR = resolve(EVAL_ROOT, "fixtures/pending");
 const BASELINE_PATH = resolve(EVAL_ROOT, "baselines/context-recall.v0.3.json");
 /** 相对退化容差，避免浮点噪声导致 CI 失败。 */
 const REGRESSION_TOLERANCE = 1e-9;
@@ -255,6 +264,18 @@ function average(values: number[]): number {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+/** 列出 pending 目录下的 jsonl 样本文件（目录不存在或为空返回空数组）。 */
+function listPendingFixtures(): string[] {
+  try {
+    return readdirSync(PENDING_DIR)
+      .filter((name) => name.endsWith(".jsonl"))
+      .sort()
+      .map((name) => resolve(PENDING_DIR, name));
+  } catch {
+    return [];
+  }
+}
+
 function printReport(label: string, report: EvaluationReport): void {
   console.log(`\n=== ${label} ${report.fixture} (${report.totalCases} cases, ${report.criticalCases} critical) ===`);
   console.log(`Recall@K            ${report.recallAtK.toFixed(4)}`);
@@ -287,6 +308,17 @@ async function main(): Promise<void> {
   for (const report of reports) printReport("lexical", report);
   if (hybrid) {
     for (const report of hybridReports) printReport("hybrid(mock)", report);
+  }
+
+  // pending 样本：只回放展示，不进 overall 聚合、不触发任何门禁
+  for (const pendingFixture of listPendingFixtures()) {
+    try {
+      const corpus = parseFixture(readFileSync(pendingFixture, "utf8"));
+      printReport("pending(lex)", aggregateReports(pendingFixture, corpus, await evaluateCorpus(corpus, verbose)));
+    } catch (error) {
+      // 人工编辑中的 pending 文件不完整属正常状态，提示后跳过，绝不让 CI 因它失败
+      console.warn(`\n--- pending fixture skipped: ${pendingFixture} (${error instanceof Error ? error.message : String(error)}) ---`);
+    }
   }
 
   const overall: Baseline & { recallAtK: number; forbiddenHitRate: number; criticalRecall: number; criticalForbiddenHitRate: number } = {
