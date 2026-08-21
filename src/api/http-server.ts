@@ -31,7 +31,7 @@ import { ConflictService } from "../governance/conflict-service.js";
 import { RetentionService } from "../governance/retention-service.js";
 import { ImpactAnalysis } from "../governance/impact-analysis.js";
 import { AutoVerifyService, type AutoVerifyResult } from "../governance/auto-verify-service.js";
-import type { AutoVerifyConfig } from "../governance/auto-verify.js";
+import { shouldAutoDeprecateFromFeedback, type AutoVerifyConfig } from "../governance/auto-verify.js";
 import type { SkillRunEventKind } from "../skills/skill-run-record.js";
 
 export function createMemorySkillsServer(options: {
@@ -554,8 +554,10 @@ async function route(
   }
 
   if (method === "POST" && url.pathname === "/v1/feedback") {
-    // 显式反馈：只采集人工判断（四分类 + 关联召回请求与资产版本），
-    // 不触发任何资产状态或内容的自动变更；read 即可提交，鼓励所有能读取的身份反馈
+    // 显式反馈：采集人工判断（四分类 + 关联召回请求与资产版本），不改写资产内容；
+    // 唯一例外：incorrect/outdated 反馈命中「规则自动 Verify（verifiedBy=auto）」的
+    // 记忆时自动降级为 deprecated（待复核、可人工恢复）——规则放行的安全网，
+    // 人工 Verify 的资产不受反馈自动影响。反馈提交本身 read 即可，鼓励所有能读取的身份反馈
     const body = await readJson(request) as {
       id?: string;
       assetKind: FeedbackAssetKind;
@@ -574,7 +576,30 @@ async function route(
       send(response, 400, { error: "BAD_REQUEST", message: "assetKind, assetId and kind are required" });
       return;
     }
-    send(response, 200, feedback.submit(body));
+    const record = feedback.submit(body);
+    // 反馈降级联动：只对 auto-verified 的 memory 生效，天然幂等
+    // （资产已非 verified 时判定为假，重复反馈不会二次转换）
+    const asset = body.assetKind === "memory" ? memory.get(body.assetId, body.scope) : undefined;
+    if (asset && shouldAutoDeprecateFromFeedback(asset.governance, body.kind)) {
+      memory.transition(body.assetId, body.scope, "deprecated");
+      security?.audit?.stateChanged({
+        principal: principal!,
+        assetKind: "memory",
+        assetId: body.assetId,
+        scope: body.scope,
+        trigger: "feedback.downgrade_auto",
+        from: "verified",
+        to: "deprecated",
+      });
+      // 降级退出可召回集，对齐向量索引（失败只记事件，不影响反馈结果）
+      await syncVectorsAfterTransition(embeddingSync, eventSink, {
+        trigger: "feedback.downgrade_auto",
+        assetKind: "memory",
+        assetId: body.assetId,
+        scope: body.scope,
+      });
+    }
+    send(response, 200, record);
     return;
   }
 
@@ -635,6 +660,43 @@ async function route(
       trigger: "retention.deprecate_expired",
       assetKind: "memory",
       assetId: result.memories[0]?.id ?? "none",
+      scope: body.scope,
+    });
+    send(response, 200, result);
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/governance/drafts/archive-stale") {
+    // Draft TTL 兜底：归档超期未审 Draft（memory + skill），draft→archived，
+    // 物理不删除任何内容；days 缺省 7 天。触发方式：本端点 / GovernancePage
+    // 按钮 / npm run governance:sweep（外部 cron），服务自身不引入常驻定时器
+    const body = await readJson(request) as { scope: Scope; days?: number };
+    if (!authorize(principal!, "review", body.scope, url.pathname, response, security)) return;
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    const result = retention!.archiveStaleDrafts(body.scope, {
+      ...(body.days === undefined ? {} : { days: body.days }),
+    });
+    // 逐资产记录归档转换（memory 与 skill 都记）
+    for (const asset of result.memories) {
+      security?.audit?.stateChanged({
+        principal: principal!, assetKind: "memory", assetId: asset.id, scope: body.scope,
+        trigger: "retention.archive_stale", from: asset.from, to: asset.to,
+      });
+    }
+    for (const asset of result.skills) {
+      security?.audit?.stateChanged({
+        principal: principal!, assetKind: "skill", assetId: asset.id, scope: body.scope,
+        trigger: "retention.archive_stale", from: asset.from, to: asset.to,
+      });
+    }
+    // 归档改变了资产状态，成功后同步一次该作用域的向量索引（照 deprecate-expired 模式）
+    await syncVectorsAfterTransition(embeddingSync, eventSink, {
+      trigger: "retention.archive_stale",
+      assetKind: "memory",
+      assetId: result.memories[0]?.id ?? result.skills[0]?.id ?? "none",
       scope: body.scope,
     });
     send(response, 200, result);

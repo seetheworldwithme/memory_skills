@@ -1,4 +1,4 @@
-import { AlertTriangle, Copy, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Archive as ArchiveIcon, Copy, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { StatusBadge } from "../components/StatusBadge";
@@ -20,6 +20,8 @@ export function GovernancePage({ api }: { api: ApiClient }) {
   const [note, setNote] = useState<string>();
   // 批量降权是批量不可逆动作（可续期恢复），先弹二次确认
   const [confirmingDeprecate, setConfirmingDeprecate] = useState(false);
+  // 归档超期 Draft 同样是批量动作（archived 为终态），先弹二次确认
+  const [confirmingArchive, setConfirmingArchive] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -66,9 +68,25 @@ export function GovernancePage({ api }: { api: ApiClient }) {
     }
   };
 
+  const archiveStaleDrafts = async () => {
+    try {
+      setBusy(true);
+      const result = await api.archiveStaleDrafts();
+      const count = result.memories.length + result.skills.length;
+      setNote(count > 0 ? `已归档 ${count} 条超期未审 Draft（内容保留可追溯）` : "当前没有超期未审的 Draft");
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "归档失败");
+    } finally {
+      setBusy(false);
+      setConfirmingArchive(false);
+    }
+  };
+
   const expired = review?.expiredMemories ?? [];
   const staleMemories = review?.staleMemories ?? [];
   const staleSkills = review?.staleSkills ?? [];
+  const staleDrafts = review?.staleDrafts ?? [];
 
   return <section className="workspace">
     <header className="page-head">
@@ -82,6 +100,9 @@ export function GovernancePage({ api }: { api: ApiClient }) {
         <button className="primary" onClick={() => setConfirmingDeprecate(true)} disabled={busy || expired.length === 0}>
           <ShieldCheck size={17} aria-hidden="true" />{busy ? "处理中…" : `降权 ${expired.length} 条过期记忆`}
         </button>
+        <button className="secondary" onClick={() => setConfirmingArchive(true)} disabled={busy || staleDrafts.length === 0}>
+          <ArchiveIcon size={17} aria-hidden="true" />归档 {staleDrafts.length} 条超期 Draft
+        </button>
       </div>
     </header>
     {note && <div className="info-banner" role="status">{note}</div>}
@@ -94,6 +115,16 @@ export function GovernancePage({ api }: { api: ApiClient }) {
         busy={busy}
         onClose={() => setConfirmingDeprecate(false)}
         onConfirm={() => void deprecateExpired()}
+      />
+    )}
+    {confirmingArchive && (
+      <ConfirmDialog
+        title={`归档 ${staleDrafts.length} 条超期未审 Draft？`}
+        description="将把超过 7 天未审核的 Draft（memory 与 skill）归档，退出待审队列；archived 是终态但内容与审计保留可追溯，不会物理删除。"
+        confirmLabel="确认归档"
+        busy={busy}
+        onClose={() => setConfirmingArchive(false)}
+        onConfirm={() => void archiveStaleDrafts()}
       />
     )}
     {loading && <div className="empty"><p>正在扫描资产…</p></div>}
@@ -130,6 +161,19 @@ export function GovernancePage({ api }: { api: ApiClient }) {
                 <button className="secondary" disabled={busy} onClick={() => void renew(item.id, extendDate(90))}>续期 90 天</button>
                 <button className="secondary" disabled={busy} onClick={() => void renew(item.id, null)}>长期有效</button>
               </div>
+            </li>)}</ul>}
+        </section>
+
+        <section className="gov-card">
+          <header className="gov-card-head">
+            <h2>超期未审 Draft <span className="gov-count">{staleDrafts.length}</span></h2>
+            <p>超过 7 天未审核的 Draft（memory 与 skill）；归档退出待审队列，内容与审计保留。会话结束当场审（y/n 快审）或 npm run review:drafts 可以及时消化。</p>
+          </header>
+          {staleDrafts.length === 0
+            ? <p className="gov-empty">没有超期未审的 Draft，待审队列健康。</p>
+            : <ul className="gov-item-list">{staleDrafts.map((item) => <li key={item.id} className="gov-item">
+              <div className="gov-item-main"><strong className="mono-id">{item.id}</strong><p>{item.preview}</p><small>上次更新 {formatDate(item.updatedAt)}</small></div>
+              <StatusBadge status={item.status} />
             </li>)}</ul>}
         </section>
 

@@ -222,6 +222,23 @@ Verified——资产带 `verifiedBy=auto` 标记区分规则放行与人工放�
 事件，放行走 `audit.state_changed`（trigger=`proposal.auto_verify`）与自动
 向量同步，与人工 Verify 同一管线。
 
+**反馈降级联动（auto 资产的安全网）**：对 `verifiedBy=auto` 记忆提交
+incorrect 或 outdated 反馈（Web 资产详情页反馈条），服务端自动把它降级为
+deprecated（待复核、退出召回、可人工恢复），审计 trigger=
+`feedback.downgrade_auto`；人工 Verify 的资产不受反馈自动影响，只作为治理
+建议展示。
+
+**Draft TTL 兜底**：超过 7 天未审核的 Draft 可一键归档（draft→archived，
+物理不删除，审计保留）：治理工作台「归档超期 Draft」按钮，或
+`POST /v1/governance/drafts/archive-stale`（`days` 可调）。周期清扫：
+
+```bash
+npm run governance:sweep   # 过期降权 + 超期 Draft 归档，一条命令两项
+# cron 示例（每日 03:17）：17 3 * * * cd /path/to/memory_skills && npm run governance:sweep >> data/governance-sweep.log 2>&1
+```
+
+不配 cron 也完全可以：工作台按钮与上述命令随时可手动兜底。
+
 事后开启规则或想对历史 Draft 补评估：`POST /v1/proposals/memory/auto-verify`
 （review 权限）批量复评该作用域全部现存 Draft。注意：调用提案的身份必须
 同时持有审核权限，自动 Verify 才会执行——write-only 身份只能拿到 Draft，

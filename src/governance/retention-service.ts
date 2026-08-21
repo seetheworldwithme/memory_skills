@@ -33,11 +33,15 @@ export interface RetentionReview {
   staleMemories: RetentionReviewItem[];
   /** 超过 staleDays 未更新的 Verified Skill（仅提示，不自动动作）。 */
   staleSkills: RetentionReviewItem[];
+  /** 超过 staleDays 未审核的 Draft（memory + skill，仅提示，可由 archiveStaleDrafts 清扫）。 */
+  staleDrafts: RetentionReviewItem[];
   generatedAt: string;
 }
 
 /** 长期未验证的默认阈值：90 天。 */
 export const DEFAULT_STALE_DAYS = 90;
+/** Draft 超期未审的默认归档阈值：7 天（审核兜底，队列不积压）。 */
+export const DEFAULT_DRAFT_STALE_DAYS = 7;
 
 export class RetentionService {
   constructor(
@@ -78,10 +82,31 @@ export class RetentionService {
         updatedAt: skill.updatedAt,
       }));
 
+    // 超期未审的 Draft（memory + skill）：只读提示，供治理工作台展示待审积压。
+    // 注意阈值与 Verified 的 90 天不同：Draft 用 archiveStaleDrafts 的 7 天口径，
+    // 保证工作台展示的积压数与"归档超期 Draft"按钮处理的范围一致
+    const draftCutoff = new Date(this.now().getTime() - DEFAULT_DRAFT_STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const staleDrafts: RetentionReviewItem[] = [];
+    for (const asset of this.repository.listMemory(scope)) {
+      if (asset.governance.status !== "draft" || asset.governance.updatedAt >= draftCutoff) continue;
+      staleDrafts.push(toMemoryItem(asset));
+    }
+    for (const skill of this.repository.listSkills(scope)) {
+      if (skill.status !== "draft" || skill.updatedAt >= draftCutoff) continue;
+      staleDrafts.push({
+        id: skill.id,
+        kind: "skill",
+        status: skill.status,
+        preview: preview(`${skill.name}：${skill.description}`),
+        updatedAt: skill.updatedAt,
+      });
+    }
+
     return {
       expiredMemories,
       staleMemories,
       staleSkills,
+      staleDrafts,
       generatedAt: now,
     };
   }
@@ -101,6 +126,37 @@ export class RetentionService {
       transitions.push({ id: asset.id, from: "verified", to });
     }
     return { memories: transitions };
+  }
+
+  /**
+   * 归档超期未审 Draft（审核兜底）：draft→archived，物理上不删除任何内容，
+   * 历史与审计仍可追溯（archived 是终态，但资产行保留）。
+   * 解决"忙起来忘记审核导致 Draft 队列无限积压"：超期 Draft 自动退出待审队列。
+   */
+  archiveStaleDrafts(scope: Scope, options: { days?: number } = {}): {
+    memories: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }>;
+    skills: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }>;
+  } {
+    const days = options.days ?? DEFAULT_DRAFT_STALE_DAYS;
+    if (!Number.isInteger(days) || days <= 0) throw new Error("days must be a positive integer");
+    const now = this.now().toISOString();
+    const cutoff = new Date(this.now().getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const memories: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }> = [];
+    for (const asset of this.repository.listMemory(scope)) {
+      if (asset.governance.status !== "draft" || asset.governance.updatedAt >= cutoff) continue;
+      const to = transitionStatus("draft", "archived");
+      this.repository.updateMemoryStatus(asset.id, to, now);
+      memories.push({ id: asset.id, from: "draft", to });
+    }
+    const skills: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }> = [];
+    for (const skill of this.repository.listSkills(scope)) {
+      if (skill.status !== "draft" || skill.updatedAt >= cutoff) continue;
+      const to = transitionStatus("draft", "archived");
+      this.repository.updateSkillStatus(skill.id, to, now);
+      skills.push({ id: skill.id, from: "draft", to });
+    }
+    return { memories, skills };
   }
 
   /**

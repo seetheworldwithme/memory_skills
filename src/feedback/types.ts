@@ -8,7 +8,11 @@ export type FeedbackAssetKind = "memory" | "skill";
 
 /**
  * 显式反馈记录：关联召回 requestId 与资产版本，用于评测与治理建议。
- * 反馈只是人工判断的采集，不会自动改写资产内容或状态。
+ * 反馈只是人工判断的采集，不改写任何资产内容。
+ * 唯一的自动联动（governance/auto-verify.ts 的 shouldAutoDeprecateFromFeedback）：
+ * incorrect/outdated 反馈命中「规则自动 Verify（verifiedBy=auto）」的记忆时，
+ * 自动降级为 deprecated 待复核（可人工恢复）——与 retention「降级不删除」哲学
+ * 一致；人工 Verify 的资产不受反馈自动影响。
  */
 export interface FeedbackRecord {
   id: string;

@@ -17,7 +17,7 @@
 ## 安全与治理边界（长期有效，不随里程碑变化）
 
 - Agent 侧永远只读。捕获、提案、Verify/Reject、发布走需 Access Key 授权的 HTTP API，由用户显式触发。
-- 模型只能提案：LLM 生成的内容只能进入 Draft，即使模型输出要求发布，也不能直接产生 Verified 资产。后续 LLM Provider 与提案流水线（Sprint 4/5）同样遵守。
+- 模型只能提案：LLM 生成的内容只能进入 Draft，即使模型输出要求发布，也不能直接产生 Verified 资产。后续 LLM Provider 与提案流水线（Sprint 4/5）同样遵守。发布决策只能来自人工操作或用户预先配置的确定性规则（`MEMORY_SKILLS_AUTO_VERIFY=rules`，默认关闭，见 governance/auto-verify.ts 与 README「规则化自动 Verify」）；规则评估抛错一律留 Draft，规则放行的资产带 `verifiedBy=auto` 标记，可被 incorrect/outdated 反馈自动降级待复核。
 - 不直接写 SQLite，不用 shell `curl` 绕过受治理 API。
 - Access Key 与模型密钥只存在于环境变量（`.env`，不入库），不进配置文件、代码、日志、事件和数据库明文。
 - 默认最小暴露：只返回当前 Scope、Verified、预算内的资产。

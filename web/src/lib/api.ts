@@ -115,6 +115,8 @@ export interface RetentionReview {
   expiredMemories: RetentionReviewItem[];
   staleMemories: RetentionReviewItem[];
   staleSkills: RetentionReviewItem[];
+  /** 超期未审的 Draft（memory + skill，仅提示，可由 archiveStaleDrafts 清扫）。 */
+  staleDrafts: RetentionReviewItem[];
   generatedAt: string;
 }
 
@@ -274,6 +276,11 @@ export class ApiClient {
     return this.request("/v1/governance/retention/deprecate-expired", { scope: LOCAL_SCOPE });
   }
 
+  /** 归档超期未审 Draft（memory + skill，默认 7 天），draft→archived，不物理删除。 */
+  async archiveStaleDrafts(days?: number): Promise<{ memories: Array<{ id: string; from: Status; to: Status }>; skills: Array<{ id: string; from: Status; to: Status }> }> {
+    return this.request("/v1/governance/drafts/archive-stale", days === undefined ? { scope: LOCAL_SCOPE } : { scope: LOCAL_SCOPE, days });
+  }
+
   /** 续期记忆：延长有效期（ISO 日期）或传 null 清除期限；因过期降权的资产恢复 Verified。 */
   async renewMemory(id: string, validUntil: string | null): Promise<void> {
     await this.request(`/v1/governance/memories/${encodeURIComponent(id)}/renew`, { scope: LOCAL_SCOPE, validUntil });
@@ -284,7 +291,7 @@ export class ApiClient {
     return this.request(`/v1/evidence/${encodeURIComponent(id)}/impact`, { scope: LOCAL_SCOPE });
   }
 
-  /** 提交显式反馈：只采集人工判断，不会自动改写资产。 */
+  /** 提交显式反馈：只采集人工判断，不改写资产内容；incorrect/outdated 命中 auto-verified 记忆时服务端自动降级待复核。 */
   async submitFeedback(input: { assetKind: "memory" | "skill"; assetId: string; kind: FeedbackKind; comment?: string }): Promise<void> {
     await this.request("/v1/feedback", { ...input, scope: LOCAL_SCOPE });
   }
