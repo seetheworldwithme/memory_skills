@@ -37,6 +37,7 @@
     "smoke:retrieval-hybrid": "npm run build:server && node --env-file-if-exists=.env scripts/smoke-retrieval-hybrid.mjs",
     "smoke:agent-host": "npm run build:server && node --env-file-if-exists=.env scripts/smoke-agent-host.mjs",
     "detect:pi": "node scripts/detect-pi-capabilities.mjs",
+    "review:drafts": "node --env-file-if-exists=.env scripts/review-drafts.mjs",
     "backup": "node scripts/backup.mjs",
     "restore": "node --import tsx scripts/restore.mjs",
     "start": "node --env-file-if-exists=.env dist/server.js",

@@ -149,12 +149,20 @@ dry 层覆盖身份/偏好/Skill 命中/无关查询不命中/密钥错误/服�
 探测与适配决策见 `docs/spikes/pi-integration-decision.md`（`npm run
 detect:pi` 复核）。
 
-## SessionEnd 半自动捕获（Evidence 层）
+## SessionEnd 半自动捕获（Evidence 层 + 可选即时审核）
 
 有价值对话无需再手动 POST：`scripts/session-end-capture.mjs` 在 Claude Code
 会话结束时读取转录文件，把用户消息与助手回复的摘要自动送入
-`POST /v1/evidence`。治理边界不变：hook 只自动捕获证据，提案仍需人工触发
-`POST /v1/proposals/*/run`，审核仍必须人工 Verify。
+`POST /v1/evidence`（携带来源会话 `originSessionId`，供多会话佐证规则使用）。
+
+设置 `MEMORY_SKILLS_SESSION_PROPOSALS=1` 后（显式 opt-in，提案会产生真实
+模型费用），hook 在捕获证据后自动触发 `POST /v1/proposals/memory/run`：
+
+- 能被服务端确定性规则放行的 Draft 直接自动 Verify（见上文「规则化自动
+  Verify」，hook 本身没有发布决策权）；
+- 剩余 Draft 在宿主终端存在时**当场快速审核**（逐条展示内容与证据摘录，
+  `y`/`n`/`a`/`q`，每个键入都是人的显式决定）；非交互环境只提示一行
+  `npm run review:drafts`。脚本总预算 60 秒，超时静默收尾，绝不阻塞会话收尾。
 
 在项目级 `.claude/settings.json`（或用户级 `~/.claude/settings.json`）中挂载：
 
@@ -176,8 +184,16 @@ detect:pi` 复核）。
 ```
 
 运行环境需提供 `MEMORY_SKILLS_URL` 与 `MEMORY_SKILLS_ACCESS_KEY`（作用域变量
-`MEMORY_SKILLS_USER_ID` 等可选，默认与 MCP 适配器一致）。证据 ID 携带内容指纹：
+`MEMORY_SKILLS_USER_ID` 等可选，默认与 MCP 适配器一致；触发提案需 admin 级
+Access Key，即同时持有 write 与 review 权限）。证据 ID 携带内容指纹：
 同一会话重复触发且摘要未变时幂等。hook 任何失败都静默退出，不影响会话收尾。
+
+批量补审（随时可用，与当场审核走同一 API）：
+
+```bash
+npm run review:drafts            # 审 memory Draft（内容 + 来源证据对照）
+npm run review:drafts -- --skills # 连 Skill Draft 一起审
+```
 
 ## 规则化自动 Verify（降低人工审核负担）
 
