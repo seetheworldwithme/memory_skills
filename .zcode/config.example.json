@@ -1,0 +1,20 @@
+{
+  "mcp": {
+    "servers": {
+      "memory-skills": {
+        "type": "stdio",
+        "command": "node",
+        "args": [
+          "--env-file=/absolute/path/to/memory_skills/.env",
+          "/absolute/path/to/memory_skills/dist/adapters/mcp/server.js"
+        ],
+        "env": {
+          "MEMORY_SKILLS_URL": "http://127.0.0.1:8421",
+          "MEMORY_SKILLS_USER_ID": "local-admin",
+          "MEMORY_SKILLS_TEAM_ID": "local",
+          "MEMORY_SKILLS_AGENT_ID": "default"
+        }
+      }
+    }
+  }
+}
