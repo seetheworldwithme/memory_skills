@@ -67,5 +67,10 @@ export interface ProposalJobReport<TCreated> {
   usage: LlmUsage;
   attempts: number;
   latencyMs: number;
+  /**
+   * 由用户预配的确定性规则自动 Verify 的资产 ID（可选新增字段）：
+   * 仅当服务端开启自动 Verify 且调用者持有审核权限时非空。
+   */
+  autoVerifiedIds?: string[];
 }
 

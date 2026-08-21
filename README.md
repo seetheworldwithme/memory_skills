@@ -179,6 +179,38 @@ detect:pi` 复核）。
 `MEMORY_SKILLS_USER_ID` 等可选，默认与 MCP 适配器一致）。证据 ID 携带内容指纹：
 同一会话重复触发且摘要未变时幂等。hook 任何失败都静默退出，不影响会话收尾。
 
+## 规则化自动 Verify（降低人工审核负担）
+
+默认关闭。开启后，memory 提案产生的 Draft 会在创建后立即按**用户预先配置的
+确定性规则**评估放行；未通过的留在 Draft 队列等人工审核。治理边界不变：
+发布决策来自用户预配的规则代码路径，模型输出本身永远不构成发布依据，
+评估抛错一律留 Draft（失败安全）。
+
+```bash
+MEMORY_SKILLS_AUTO_VERIFY=rules                              # 开启（缺省 off）
+MEMORY_SKILLS_AUTO_VERIFY_MIN_CONFIDENCE=0.8                 # 候选置信度下限
+MEMORY_SKILLS_AUTO_VERIFY_LAYERS=l1                          # 允许的层级（默认仅 l1）
+MEMORY_SKILLS_AUTO_VERIFY_EVIDENCE_ROLES=user                # 来源证据角色白名单（默认仅用户原话）
+MEMORY_SKILLS_AUTO_VERIFY_MIN_OVERLAP=0.8                    # Draft 与证据原文的字符 bigram 覆盖率下限
+MEMORY_SKILLS_AUTO_VERIFY_REQUIRE_MULTI_SESSION=0            # 要求证据来自 >=2 个独立会话
+```
+
+放行条件（全部满足）：memory 资产（v1 Skill 永不自动 Verify，可执行指令
+风险高）、`sensitivity=normal`、层级在白名单内、置信度达标、来源证据角色
+全部在白名单内、Draft 内容对证据原文的 bigram 覆盖率达标（防模型改写发挥）。
+非法配置值整体回退缺省（更保守一侧）。
+
+语义说明：忠实抽取意味着"用户确实说过这句话"，但用户口误也会原样进入
+Verified——资产带 `verifiedBy=auto` 标记区分规则放行与人工放行，便于事后
+复核与降级。每次评估（无论放行与否）都产生 `governance.auto_verify.evaluated`
+事件，放行走 `audit.state_changed`（trigger=`proposal.auto_verify`）与自动
+向量同步，与人工 Verify 同一管线。
+
+事后开启规则或想对历史 Draft 补评估：`POST /v1/proposals/memory/auto-verify`
+（review 权限）批量复评该作用域全部现存 Draft。注意：调用提案的身份必须
+同时持有审核权限，自动 Verify 才会执行——write-only 身份只能拿到 Draft，
+不能借提案端点间接发布。
+
 ## Hybrid retrieval（混合检索）
 
 服务默认词法检索；配置 `MEMORY_SKILLS_RETRIEVAL=hybrid` 并配齐 Embedding

@@ -10,6 +10,12 @@ export interface Evidence {
   role: EvidenceRole;
   content: string;
   capturedAt: string;
+  /**
+   * 证据的来源会话（可选，迁移 005 新增）：与 scope.sessionId（作用域过滤键）
+   * 解耦——记录"这句话发生在哪个宿主会话"，供"多独立会话佐证"等规则使用，
+   * 不参与作用域可见性过滤。
+   */
+  originSessionId?: string;
 }
 
 export interface MemoryAsset {

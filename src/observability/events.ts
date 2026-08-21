@@ -17,7 +17,8 @@ export type ObservabilityEventType =
   | "audit.login_failed"
   | "audit.denied"
   | "audit.state_changed"
-  | "audit.proposal_run";
+  | "audit.proposal_run"
+  | "governance.auto_verify.evaluated";
 
 /** 事件公共信封字段，所有事件都必须携带。 */
 interface EventEnvelope {
@@ -145,6 +146,20 @@ export interface AuditProposalRunEvent extends EventEnvelope {
   errorCode?: string;
 }
 
+/**
+ * 规则化自动 Verify 评估事件：每次确定性规则评估（无论放行与否）都记录，
+ * ruleCodes 是枚举规则码、errorCode 只记错误名，绝不携带资产内容。
+ */
+export interface GovernanceAutoVerifyEvaluatedEvent extends EventEnvelope {
+  eventType: "governance.auto_verify.evaluated";
+  assetKind: "memory";
+  assetId: string;
+  scope: Scope;
+  passed: boolean;
+  ruleCodes: string[];
+  errorCode?: string;
+}
+
 export type ObservabilityEvent =
   | ServiceStartedEvent
   | ContextRecallCompletedEvent
@@ -155,7 +170,8 @@ export type ObservabilityEvent =
   | AuditLoginFailedEvent
   | AuditDeniedEvent
   | AuditStateChangedEvent
-  | AuditProposalRunEvent;
+  | AuditProposalRunEvent
+  | GovernanceAutoVerifyEvaluatedEvent;
 
 /**
  * 每种事件允许输出的字段白名单。
@@ -178,6 +194,7 @@ const FIELD_ALLOWLIST: Record<ObservabilityEventType, readonly string[]> = {
   "audit.denied": ["userId", "path", "code", "action"],
   "audit.state_changed": ["userId", "assetKind", "assetId", "scope", "trigger", "from", "to"],
   "audit.proposal_run": ["userId", "kind", "ok", "errorCode"],
+  "governance.auto_verify.evaluated": ["assetKind", "assetId", "scope", "passed", "ruleCodes", "errorCode"],
 };
 
 /** 按白名单投影事件并序列化为单行 JSON，供 JSONL 输出使用。 */

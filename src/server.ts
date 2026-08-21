@@ -14,6 +14,7 @@ import { resolveLlmConfigFromEnv } from "./llm/model-config.js";
 import type { LlmProvider } from "./llm/types.js";
 import { resolveRetrieverFromEnv } from "./retrieval/retriever.js";
 import { describeEmbeddingConfig } from "./retrieval/embedding-provider.js";
+import { resolveAutoVerifyConfigFromEnv } from "./governance/auto-verify.js";
 
 const host = process.env.MEMORY_SKILLS_HOST ?? "127.0.0.1";
 const port = Number.parseInt(process.env.MEMORY_SKILLS_PORT ?? "8421", 10);
@@ -70,6 +71,9 @@ const server = createMemorySkillsServer({
   security: { rateLimiter, audit },
   webRoot,
   eventSink,
+  // 规则化自动 Verify：默认关闭（提案只产 Draft）；MEMORY_SKILLS_AUTO_VERIFY=rules
+  // 开启后按用户预配的确定性规则放行低风险 Draft，详见 README「规则化自动 Verify」
+  autoVerify: resolveAutoVerifyConfigFromEnv(process.env),
   ...(llmProvider !== undefined ? { llmProvider } : {}),
   ...(retrieval !== undefined ? { retriever: retrieval.retriever } : {}),
   ...(retrieval?.embedding !== undefined

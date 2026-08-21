@@ -43,7 +43,9 @@ export function MemoryPage({ api }: { api: ApiClient }) {
       setProposalNote(undefined);
       const report = await api.runMemoryProposal();
       const rejectedNote = report.rejected.length > 0 ? `；拒绝 ${report.rejected.length} 条候选（占位、敏感、重复或缺少来源）` : "";
-      setProposalNote(`已生成 ${report.created.length} 条草稿${rejectedNote} · 模型 ${report.model || "未调用"} · ${report.latencyMs}ms`);
+      // 服务端开启规则化自动 Verify 时部分草稿已被确定性规则放行，向审核者明示
+      const autoNote = report.autoVerifiedIds && report.autoVerifiedIds.length > 0 ? `；${report.autoVerifiedIds.length} 条已按规则自动 Verify` : "";
+      setProposalNote(`已生成 ${report.created.length} 条草稿${rejectedNote}${autoNote} · 模型 ${report.model || "未调用"} · ${report.latencyMs}ms`);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "提案生成失败");

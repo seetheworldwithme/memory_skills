@@ -17,10 +17,11 @@ import { readRequestBody } from "./read-request-body.js";
 import { GovernanceError } from "../governance/lifecycle.js";
 import { ContextService } from "../context/context-service.js";
 import { ProposalService } from "../extraction/proposal-service.js";
-import type { ProposalJobInput } from "../extraction/interfaces.js";
+import type { ProposalJobInput, ProposalJobReport } from "../extraction/interfaces.js";
+import type { MemoryAsset } from "../memory/types.js";
 import type { LlmProvider } from "../llm/types.js";
 import type { EventSink } from "../observability/event-sink.js";
-import { EVENT_SCHEMA_VERSION, errorCodeFor, type RetrievalAutoSyncCompletedEvent, type RetrievalAutoSyncFailedEvent } from "../observability/events.js";
+import { EVENT_SCHEMA_VERSION, errorCodeFor, type GovernanceAutoVerifyEvaluatedEvent, type RetrievalAutoSyncCompletedEvent, type RetrievalAutoSyncFailedEvent } from "../observability/events.js";
 import { EmbeddingSyncService } from "../retrieval/embedding-sync.js";
 import type { AssetKind, EmbeddingProvider, Retriever, VectorIndex } from "../retrieval/types.js";
 import type { Scope } from "../governance/types.js";
@@ -29,6 +30,8 @@ import type { FeedbackAssetKind, FeedbackKind } from "../feedback/types.js";
 import { ConflictService } from "../governance/conflict-service.js";
 import { RetentionService } from "../governance/retention-service.js";
 import { ImpactAnalysis } from "../governance/impact-analysis.js";
+import { AutoVerifyService, type AutoVerifyResult } from "../governance/auto-verify-service.js";
+import type { AutoVerifyConfig } from "../governance/auto-verify.js";
 import type { SkillRunEventKind } from "../skills/skill-run-record.js";
 
 export function createMemorySkillsServer(options: {
@@ -49,6 +52,11 @@ export function createMemorySkillsServer(options: {
   embedding?: { provider: EmbeddingProvider; index: VectorIndex; batchSize?: number };
   /** 安全组件（Task 16）：速率限制与审计；缺省时不限流、不产出审计事件。 */
   security?: { rateLimiter?: RateLimiter; audit?: AuditService };
+  /**
+   * 规则化自动 Verify 配置：enabled=true 时 memory 提案产生的 Draft 会在
+   * 创建后立即按确定性规则评估放行；缺省关闭，提案只产 Draft。
+   */
+  autoVerify?: AutoVerifyConfig;
 }): Server {
   if (!options.accessKey.trim()) throw new Error("accessKey must not be empty");
   const auth = options.authService ?? new AuthService({ accessKey: options.accessKey });
@@ -71,10 +79,13 @@ export function createMemorySkillsServer(options: {
   const conflicts = new ConflictService(options.repository);
   const retention = new RetentionService(options.repository);
   const impact = new ImpactAnalysis(options.repository);
+  const autoVerifier = options.autoVerify?.enabled
+    ? new AutoVerifyService({ memory, repository: options.repository, config: options.autoVerify })
+    : undefined;
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, memory, skills, context, proposals, embeddingSync, feedback, options.repository, auth, options.security, options.webRoot, options.eventSink, conflicts, retention, impact);
+      await route(request, response, memory, skills, context, proposals, embeddingSync, feedback, options.repository, auth, options.security, options.webRoot, options.eventSink, conflicts, retention, impact, autoVerifier);
     } catch (error) {
       const status = error instanceof DomainError
         ? error.status
@@ -112,6 +123,7 @@ async function route(
   conflicts?: ConflictService,
   retention?: RetentionService,
   impact?: ImpactAnalysis,
+  autoVerifier?: AutoVerifyService,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
@@ -260,6 +272,22 @@ async function route(
         ? await proposals.runMemoryProposal(input)
         : await proposals.runSkillProposal(input);
       security?.audit?.proposalRun({ principal: principal!, kind: proposalKind, ok: true });
+      // 规则化自动 Verify（方向 A）：只在"规则开启 + 调用者同时持有审核权限"时
+      // 才对新建 Draft 做确定性评估放行；write-only 身份只能拿到 Draft，
+      // 不能借提案端点间接获得发布能力（判定不走 authorize，避免误记 denied 噪音）
+      if (proposalKind === "memory" && autoVerifier && canPerform(principal!, "review")) {
+        // proposalKind 无法收窄 report 的泛型，这里显式按 memory 报告处理
+        const memoryReport = report as ProposalJobReport<MemoryAsset>;
+        const autoVerifiedIds = await applyAutoVerifyResults(
+          autoVerifier.verifyCreated(input.scope, memoryReport.created),
+          { principal: principal!, scope: input.scope, security, eventSink, embeddingSync },
+        );
+        if (autoVerifiedIds.length > 0) {
+          memoryReport.autoVerifiedIds = autoVerifiedIds;
+          // 刷新响应中的资产状态：autoVerified 的条目已从 Draft 变为 Verified
+          memoryReport.created = memoryReport.created.map((asset) => memory.get(asset.id, input.scope) ?? asset);
+        }
+      }
       send(response, 200, report);
     } catch (error) {
       security?.audit?.proposalRun({
@@ -268,6 +296,30 @@ async function route(
       });
       throw error;
     }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/proposals/memory/auto-verify") {
+    // 批量复评：对现存 Draft 按当前规则补评估（事后开启规则/多会话规则成熟时用）。
+    // 只做确定性评估与状态转换，不触发任何模型调用；审核权限即可调用
+    const body = await readJson(request) as { scope: Scope };
+    if (!authorize(principal!, "review", body.scope, url.pathname, response, security)) return;
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    if (!autoVerifier) {
+      send(response, 503, {
+        error: "AUTO_VERIFY_DISABLED",
+        message: "规则化自动 Verify 未开启（MEMORY_SKILLS_AUTO_VERIFY=rules）",
+      });
+      return;
+    }
+    const results = autoVerifier.evaluateDrafts(body.scope);
+    await applyAutoVerifyResults(results, {
+      principal: principal!, scope: body.scope, security, eventSink, embeddingSync,
+    });
+    send(response, 200, { results });
     return;
   }
 
@@ -679,6 +731,57 @@ function sendRateLimited(response: ServerResponse, retryAfterSeconds: number): v
     "retry-after": String(retryAfterSeconds),
   });
   response.end(body);
+}
+
+/**
+ * 应用自动 Verify 评估结果：每条评估（无论放行与否）都发
+ * governance.auto_verify.evaluated 事件；放行者沿人工 Verify 同一管线补
+ * audit.state_changed（trigger=proposal.auto_verify）与自动向量同步。
+ * 返回被自动 Verify 的资产 ID 列表。评估本身已在 AutoVerifyService 内
+ * 失败安全（抛错留 Draft），这里的同步失败同样只记事件不影响结果。
+ */
+async function applyAutoVerifyResults(
+  results: readonly AutoVerifyResult[],
+  deps: {
+    principal: Principal;
+    scope: Scope;
+    security?: { rateLimiter?: RateLimiter; audit?: AuditService } | undefined;
+    eventSink?: EventSink | undefined;
+    embeddingSync?: EmbeddingSyncService | undefined;
+  },
+): Promise<string[]> {
+  const autoVerifiedIds: string[] = [];
+  for (const result of results) {
+    deps.eventSink?.emit({
+      schemaVersion: EVENT_SCHEMA_VERSION,
+      eventType: "governance.auto_verify.evaluated",
+      timestamp: new Date().toISOString(),
+      assetKind: "memory",
+      assetId: result.id,
+      scope: deps.scope,
+      passed: result.passed,
+      ruleCodes: result.ruleCodes,
+      ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+    } satisfies GovernanceAutoVerifyEvaluatedEvent);
+    if (!result.passed) continue;
+    autoVerifiedIds.push(result.id);
+    deps.security?.audit?.stateChanged({
+      principal: deps.principal,
+      assetKind: "memory",
+      assetId: result.id,
+      scope: deps.scope,
+      trigger: "proposal.auto_verify",
+      from: "draft",
+      to: "verified",
+    });
+    await syncVectorsAfterTransition(deps.embeddingSync, deps.eventSink, {
+      trigger: "proposal.auto_verify",
+      assetKind: "memory",
+      assetId: result.id,
+      scope: deps.scope,
+    });
+  }
+  return autoVerifiedIds;
 }
 
 /**

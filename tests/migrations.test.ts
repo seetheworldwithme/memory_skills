@@ -62,6 +62,7 @@ test("全新库：从零应用全部迁移，结构与旧版内联建库一致",
   const report = runMigrations(db);
   assert.deepEqual(report.applied.map(({ id, name }) => [id, name]), [
     [1, "core-tables"], [2, "feedback"], [3, "skill-runs"], [4, "skill-version-status"],
+    [5, "evidence-origin-session"],
   ]);
   assert.equal(report.baselineDetected, null);
   assert.equal(report.versionAfter, MIGRATIONS.length);
@@ -79,7 +80,7 @@ test("跨版本升级（历史 fixture 一：v0.2 核心库）：增量应用且
   // v0.2 库 = 只有 001 核心表
   const db = buildLegacyDatabase([1], seedCoreData);
   const report = runMigrations(db);
-  assert.deepEqual(report.applied.map(({ id }) => id), [2, 3, 4]);
+  assert.deepEqual(report.applied.map(({ id }) => id), [2, 3, 4, 5]);
   assert.equal(currentSchemaVersion(db), MIGRATIONS.length);
 
   // 004 回填：当前版本（v2）拿到 skills.status，历史版本（v1）状态不可考为 NULL
@@ -105,22 +106,26 @@ test("跨版本升级（历史 fixture 二：v0.5 反馈库）：只补 003/004"
     `).run();
   });
   const report = runMigrations(db);
-  assert.deepEqual(report.applied.map(({ id }) => id), [3, 4]);
+  assert.deepEqual(report.applied.map(({ id }) => id), [3, 4, 5]);
 
   // 反馈数据跨升级保留
   assert.equal(db.prepare("SELECT count(*) AS c FROM feedback").get()?.c, 1);
   assert.equal(db.prepare("SELECT status FROM skill_versions WHERE version = 2").get()?.status, "draft");
 });
 
-test("旧版内联建库（无 schema_migrations）：结构指纹识别基线，只登记不重放", () => {
-  // 模拟现有 8421 生产库形态：全部表和 status 列都在，但从未登记迁移版本
+test("旧版内联建库（无 schema_migrations）：结构指纹识别基线，只登记不重放增量迁移", () => {
+  // 模拟 005 之前的生产库形态：全部表和 status 列都在，但从未登记迁移版本
   const db = buildLegacyDatabase([1, 2, 3, 4], seedCoreData);
   db.exec("DROP TABLE IF EXISTS schema_migrations");
 
   const report = runMigrations(db);
   assert.equal(report.baselineDetected, 4);
-  assert.deepEqual(report.applied, []);
+  // 基线识别为 v4：001-004 只登记不重放；基线之后的 005 正常增量应用
+  assert.deepEqual(report.applied.map(({ id }) => id), [5]);
   assert.equal(currentSchemaVersion(db), MIGRATIONS.length);
+  const hasOriginSession = db.prepare("PRAGMA table_info(evidence)").all()
+    .some((column) => column.name === "origin_session_id");
+  assert.ok(hasOriginSession);
   // 重复执行：稳定 no-op
   const again = runMigrations(db);
   assert.deepEqual(again.applied, []);
@@ -129,7 +134,9 @@ test("旧版内联建库（无 schema_migrations）：结构指纹识别基线�
 test("dryRun：只报告待应用迁移，不改动数据库", () => {
   const db = buildLegacyDatabase([1], seedCoreData);
   const report = runMigrations(db, { dryRun: true });
-  assert.deepEqual(report.applied.map(({ id }) => id), [2, 3, 4]);
+  // 期望值随迁移注册表动态计算：基线 1 之后的全部迁移都应出现在 pending 中
+  const expectedPending = MIGRATIONS.filter(({ id }) => id > 1).map(({ id }) => id);
+  assert.deepEqual(report.applied.map(({ id }) => id), expectedPending);
   // 库未被改动：feedback 表仍未创建
   const hasFeedback = db.prepare("SELECT name FROM sqlite_master WHERE name = 'feedback'").get();
   assert.equal(hasFeedback, undefined);

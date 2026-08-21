@@ -39,8 +39,8 @@ export class SqliteRepository {
     }
     this.db.prepare(`
       INSERT OR IGNORE INTO evidence
-      (id,user_id,team_id,agent_id,session_id,role,content,captured_at)
-      VALUES (?,?,?,?,?,?,?,?)
+      (id,user_id,team_id,agent_id,session_id,role,content,captured_at,origin_session_id)
+      VALUES (?,?,?,?,?,?,?,?,?)
     `).run(
       evidence.id,
       evidence.scope.userId,
@@ -50,6 +50,7 @@ export class SqliteRepository {
       evidence.role,
       evidence.content,
       evidence.capturedAt,
+      evidence.originSessionId ?? null,
     );
     return this.getEvidence(evidence.id)!;
   }
@@ -124,12 +125,19 @@ export class SqliteRepository {
     return asset && sameScope(asset.scope, scope) ? asset : undefined;
   }
 
-  updateMemoryStatus(id: string, status: GovernedStatus, updatedAt: string): MemoryAsset {
+  updateMemoryStatus(
+    id: string,
+    status: GovernedStatus,
+    updatedAt: string,
+    extra?: { verifiedBy?: "auto" | "manual" },
+  ): MemoryAsset {
     const asset = this.getMemory(id);
     if (!asset) throw new Error(`memory not found: ${id}`);
     asset.governance.status = status;
     asset.governance.updatedAt = updatedAt;
     if (status === "verified") asset.governance.lastVerifiedAt = updatedAt;
+    // Verify 执行者标记：规则放行记 auto，人工/缺省记 manual（旧数据缺省即 manual）
+    if (status === "verified") asset.governance.verifiedBy = extra?.verifiedBy ?? "manual";
     this.db.prepare("UPDATE memory_assets SET governance_json = ? WHERE id = ?")
       .run(JSON.stringify(asset.governance), id);
     return asset;
@@ -454,6 +462,7 @@ function rowToEvidence(row: DbRow): Evidence {
     role: String(row.role) as Evidence["role"],
     content: String(row.content),
     capturedAt: String(row.captured_at),
+    ...(row.origin_session_id == null ? {} : { originSessionId: String(row.origin_session_id) }),
   };
 }
 

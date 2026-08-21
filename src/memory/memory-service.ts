@@ -18,6 +18,7 @@ export class MemoryService {
     role: EvidenceRole;
     content: string;
     capturedAt?: string;
+    originSessionId?: string;
   }): Evidence {
     requireText(input.id, "id");
     requireText(input.content, "content");
@@ -77,13 +78,19 @@ export class MemoryService {
     return this.repository.listMemory(scope);
   }
 
-  transition(id: string, scope: Scope, target: GovernedStatus): MemoryAsset {
+  transition(
+    id: string,
+    scope: Scope,
+    target: GovernedStatus,
+    options?: { verifiedBy?: "auto" | "manual" },
+  ): MemoryAsset {
     const asset = this.repository.getMemoryScoped(id, scope);
     if (!asset) throw new NotFoundError(`memory not found: ${id}`);
     return this.repository.updateMemoryStatus(
       id,
       transitionStatus(asset.governance.status, target),
       this.now().toISOString(),
+      options,
     );
   }
 

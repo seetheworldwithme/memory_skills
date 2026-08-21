@@ -136,6 +136,8 @@ export interface ProposalRunReport<TCreated> {
   rejected: Array<{ index: number; summary: string; reasons: string[] }>;
   attempts: number;
   latencyMs: number;
+  /** 由用户预配的确定性规则自动 Verify 的资产 ID（服务端开启时非空）。 */
+  autoVerifiedIds?: string[];
 }
 
 /** 显式反馈四分类：与后端 FEEDBACK_KINDS 对应。 */
