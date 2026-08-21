@@ -2,6 +2,8 @@ import { AlertTriangle, Copy, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { StatusBadge } from "../components/StatusBadge";
+import { ConfirmDialog } from "../components/Modal";
+import { formatDate } from "../lib/format";
 import type { ApiClient, GovernanceTask, RetentionReview } from "../lib/api";
 
 /**
@@ -16,6 +18,8 @@ export function GovernancePage({ api }: { api: ApiClient }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [note, setNote] = useState<string>();
+  // 批量降权是批量不可逆动作（可续期恢复），先弹二次确认
+  const [confirmingDeprecate, setConfirmingDeprecate] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -45,6 +49,7 @@ export function GovernancePage({ api }: { api: ApiClient }) {
       setError(reason instanceof Error ? reason.message : "降权失败");
     } finally {
       setBusy(false);
+      setConfirmingDeprecate(false);
     }
   };
 
@@ -73,27 +78,37 @@ export function GovernancePage({ api }: { api: ApiClient }) {
         <p>处理重复与冲突资产，复核过期内容；所有动作都需要人工确认。</p>
       </div>
       <div className="page-actions">
-        <button className="secondary" onClick={() => void load()} disabled={loading || busy}><RefreshCw size={17} />刷新</button>
-        <button className="primary" onClick={() => void deprecateExpired()} disabled={busy || expired.length === 0}>
-          <ShieldCheck size={17} />{busy ? "处理中…" : `降权 ${expired.length} 条过期记忆`}
+        <button className="secondary" onClick={() => void load()} disabled={loading || busy}><RefreshCw size={17} aria-hidden="true" />刷新</button>
+        <button className="primary" onClick={() => setConfirmingDeprecate(true)} disabled={busy || expired.length === 0}>
+          <ShieldCheck size={17} aria-hidden="true" />{busy ? "处理中…" : `降权 ${expired.length} 条过期记忆`}
         </button>
       </div>
     </header>
-    {note && <div className="info-banner">{note}</div>}
-    {error && <div className="error-banner">{error}</div>}
+    {note && <div className="info-banner" role="status">{note}</div>}
+    {error && <div className="error-banner" role="alert">{error}</div>}
+    {confirmingDeprecate && (
+      <ConfirmDialog
+        title={`降权 ${expired.length} 条过期记忆？`}
+        description="将把这些已过有效期的 Verified 记忆降权为待复核（Deprecated），立即退出召回；可随时在下方列表续期恢复，不会物理删除。"
+        confirmLabel="确认降权"
+        busy={busy}
+        onClose={() => setConfirmingDeprecate(false)}
+        onConfirm={() => void deprecateExpired()}
+      />
+    )}
     {loading && <div className="empty"><p>正在扫描资产…</p></div>}
     {!loading && (
       <div className="gov-stack">
         <section className="gov-card">
           <header className="gov-card-head">
-            <h2><AlertTriangle size={16} />重复与冲突任务 <span className="gov-count">{tasks.length}</span></h2>
+            <h2><AlertTriangle size={16} aria-hidden="true" />重复与冲突任务 <span className="gov-count">{tasks.length}</span></h2>
             <p>确定性扫描（不调用模型）：处置其中一条资产后，任务会在下次扫描中消失。</p>
           </header>
           {tasks.length === 0
             ? <p className="gov-empty">没有发现重复或相互冲突的 Verified 资产。</p>
             : <ul className="gov-task-list">{tasks.map((task) => <li key={task.id} className="gov-task">
               <div className="gov-task-top">
-                <span className={`gov-kind gov-kind--${task.kind}`}>{task.kind === "duplicate" ? <><Copy size={13} />重复</> : <><AlertTriangle size={13} />疑似冲突</>}</span>
+                <span className={`gov-kind gov-kind--${task.kind}`}>{task.kind === "duplicate" ? <><Copy size={13} aria-hidden="true" />重复</> : <><AlertTriangle size={13} aria-hidden="true" />疑似冲突</>}</span>
                 <span className="gov-asset-kind">{task.assetKind === "memory" ? "记忆" : "Skill"}</span>
               </div>
               <p className="gov-task-detail">{task.detail}</p>
@@ -138,8 +153,4 @@ export function GovernancePage({ api }: { api: ApiClient }) {
 function extendDate(days: number): string {
   const date = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
   return date.toISOString();
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" }).format(new Date(value));
 }

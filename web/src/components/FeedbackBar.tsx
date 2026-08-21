@@ -44,8 +44,8 @@ export function FeedbackBar({ api, assetKind, assetId }: { api: ApiClient; asset
           </button>
         ))}
       </div>
-      {submitted && <small className="feedback-note">已记录「{OPTIONS.find((option) => option.kind === submitted)?.label}」，用于评测与治理建议</small>}
-      {error && <small className="feedback-error">{error}</small>}
+      {submitted && <small className="feedback-note" role="status">已记录「{OPTIONS.find((option) => option.kind === submitted)?.label}」，用于评测与治理建议</small>}
+      {error && <small className="feedback-error" role="alert">{error}</small>}
     </div>
   );
 }

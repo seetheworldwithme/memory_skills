@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { formatDateTime } from "../lib/format";
 import type { ApiClient, EvidenceRecord } from "../lib/api";
 
 /**
@@ -38,7 +39,7 @@ export function EvidenceBlock({ api, evidenceIds }: { api: ApiClient; evidenceId
             <figcaption>
               <span className={`role role-${record?.role ?? "unknown"}`}>{record?.role ?? "未知"}</span>
               <span className="mono-id">{id}</span>
-              {record && <time>{new Date(record.capturedAt).toLocaleString("zh-CN")}</time>}
+              {record && <time dateTime={record.capturedAt}>{formatDateTime(record.capturedAt)}</time>}
             </figcaption>
             {record ? <blockquote>{record.content}</blockquote> : <blockquote>（证据已被删除或不可见）</blockquote>}
           </figure>
