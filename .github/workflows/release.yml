@@ -1,0 +1,125 @@
+# 发布链路（Task 18）：推送 v* 标签触发。
+# 产物形态（已确认）：GitHub Release（SBOM + sha256 校验和 + 版本迁移说明）
+# + 容器镜像推送 ghcr.io；npm 包保持 private 不公开发布。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+
+      - name: 安装依赖（根 + web）
+        run: npm ci && npm --prefix web ci
+
+      # 发布前与 CI 同一套门禁，不因发版而放宽
+      - name: 测试（server + web）
+        run: npm test
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建（server tsc + web vite）
+        run: npm run build
+
+      - name: 检索评测回归（strict）
+        run: npm run eval:retrieval:strict
+
+      - name: 依赖审计（根 + web，运行时依赖）
+        run: npm audit --omit=dev --audit-level=high && npm --prefix web audit --omit=dev --audit-level=high
+
+      # SBOM：根包与 web 子包各生成一份 CycloneDX
+      - name: 生成 SBOM（CycloneDX）
+        run: |
+          npm sbom --sbom-format cyclonedx --omit=dev > sbom-memory-skills.cdx.json
+          cd web && npm sbom --sbom-format cyclonedx --omit=dev > ../sbom-memory-skills-web.cdx.json
+
+      - name: 生成 sha256 校验和
+        run: sha256sum sbom-*.cdx.json > checksums.txt
+
+      # 容器镜像推送 ghcr.io（amd64 + arm64）；metadata-action 负责标签生成与镜像名小写化
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 提取镜像标签（tag 名 + latest，镜像名自动小写）
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - name: 构建并推送镜像
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: 整理镜像摘要
+        run: |
+          echo "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" > image-digest.txt
+          cat image-digest.txt >> checksums.txt
+
+      # GitHub Release：SBOM/校验和作为附件，正文含迁移说明与 attribution
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sbom-memory-skills.cdx.json
+            sbom-memory-skills-web.cdx.json
+            checksums.txt
+            image-digest.txt
+          body: |
+            ## memory-skills ${{ github.ref_name }}
+
+            发布门禁：server/web 测试、typecheck、build、检索评测 strict 基线、
+            运行时依赖审计（high+）全部通过。
+
+            ## 版本迁移说明
+
+            升级前请按 `docs/operations.md` 的「升级预演流程」操作：
+            备份（`npm run backup` / `scripts/backup.mjs`）→ 新版本 dry-run 迁移
+            （`migration-runner` dryRun）→ 停机替换 → 健康检查。Schema 迁移为
+            版本化单向链，失败停在上一完整版本，永不自动回滚。
+
+            ## 容器镜像
+
+            - `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
+            - 摘要：`ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}`
+            - 非 root 运行；数据目录显式挂载 `/app/data`；健康检查 `/health`。
+            - 部署步骤见 `compose.yaml` 与 `README.md`（部署章节）、
+              远程 MCP 接入见 `docs/integrations/remote-mcp.md`。
+
+            ## Attribution
+
+            MIT License。本仓库为 TencentDB Agent Memory 的非官方衍生项目
+            （Portions derived from TencentDB Agent Memory, Copyright (C) 2026
+            Tencent, under the MIT License），不代表腾讯官方立场。

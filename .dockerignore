@@ -1,0 +1,30 @@
+# 构建上下文瘦身：镜像构建只用 tsconfig/src/web 源码/lockfile/backup 脚本
+.git
+.github
+.vscode
+.idea
+.zcode
+.claude
+.codex
+# 宿主真实配置与密钥绝不进镜像
+.env
+.env.*
+!.env.example
+opencode.json
+# 依赖与产物一律镜像内现场构建
+node_modules
+web/node_modules
+dist
+web/dist
+# 运行时数据
+data
+*.db
+*.db-shm
+*.db-wal
+# 测试/评测/文档不参与镜像构建
+tests
+evals
+docs
+*.md
+!README.md
+.DS_Store

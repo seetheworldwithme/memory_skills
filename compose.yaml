@@ -1,0 +1,25 @@
+# memory-skills 服务器部署（Task 18/19）：
+# - api：主服务（HTTP API + Web 控制台 + SQLite），数据落在命名卷 /app/data
+# - mcp：远程 MCP 端点（Streamable HTTP，Task 19 交付后加入本文件）
+# 密钥经 .env 注入容器（MEMORY_SKILLS_ACCESS_KEY 必填），不写入本文件。
+#
+# 按决策默认端口直接公网暴露（0.0.0.0）。若改走 SSH 隧道/Tailscale/反向代理，
+# 把端口映射改成 "127.0.0.1:8421:8421" 这类回环绑定即可，无需其他改动。
+
+services:
+  api:
+    build: .
+    image: memory-skills:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 数据目录语义显式声明（容器内 CWD 为 /app，实际路径 /app/data/...）
+      MEMORY_SKILLS_DB: data/memory-skills.db
+      MEMORY_SKILLS_BACKUP_DIR: data/backups
+    ports:
+      - "8421:8421"
+    volumes:
+      - data:/app/data
+
+volumes:
+  data:

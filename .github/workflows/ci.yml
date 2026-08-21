@@ -1,0 +1,64 @@
+# CI 门禁（Task 18）：全部步骤零密钥、零真实模型调用（smoke:* 脚本被
+# MEMORY_SKILLS_SMOKE 门控，CI 不设置该变量即自动跳过，不产生费用）。
+# 本地验证与真实 Runner 验收分别记录，互不替代（见 docs/operations.md）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+
+      # 根包与 web 子包各自按 lockfile 安装（web 测试需要 vitest/jsdom）
+      - name: 安装依赖（根 + web）
+        run: npm ci && npm --prefix web ci
+
+      # server node:test（本机回环网络）+ web vitest
+      - name: 测试（server + web）
+        run: npm test
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建（server tsc + web vite）
+        run: npm run build
+
+      # 检索评测回归：确定性离线基线门禁（内存库 + 词法路径，不读任何密钥）
+      - name: 检索评测回归（基线门禁）
+        run: npm run eval:retrieval
+
+      - name: 检索评测回归（strict：critical 用例全中 + 零禁止命中）
+        run: npm run eval:retrieval:strict
+
+      # 依赖审计：只审计运行时依赖（--omit=dev），high 及以上即失败
+      - name: 依赖审计（根，运行时依赖）
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: 依赖审计（web，运行时依赖）
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
+
+      # 镜像可构建性检查（不推送），防止 Dockerfile 腐化
+      - name: Docker 镜像构建检查
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: memory-skills:ci

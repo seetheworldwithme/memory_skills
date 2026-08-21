@@ -48,6 +48,28 @@ The first web milestone uses one local administrator scope
 (`local-admin/local/default`). It deliberately does not include registration,
 multiple users, teams, password recovery, or role-based authorization.
 
+## 部署（Docker Compose，远程服务器）
+
+在远程服务器上以容器方式运行（非 root、数据目录显式挂载、健康检查走
+`/health`）：
+
+```bash
+cp .env.example .env       # 编辑：MEMORY_SKILLS_ACCESS_KEY 必填，用长随机值
+docker compose up -d       # 构建并启动 api 服务（HTTP API + Web 控制台）
+curl http://127.0.0.1:8421/health
+```
+
+数据（SQLite、迁移前自动备份、审计事件）都在命名卷 `data` 的 `/app/data`
+下；升级与备份恢复流程见 `docs/operations.md`。远程 MCP 端点（本地 Agent
+宿主连接远程服务器）见 `docs/integrations/remote-mcp.md`。
+
+安全提醒：`compose.yaml` 默认按公网直暴露发布端口（`8421:8421`）。此时
+Access Key 与 Token 以 Bearer 明文走 HTTP，务必使用长随机密钥；更稳妥的
+做法是把端口映射改为 `127.0.0.1:8421:8421` 回环绑定，经 SSH 隧道、
+Tailscale 或带 TLS 的反向代理访问。CI（`.github/workflows/ci.yml`）与
+发布链路（`release.yml`：SBOM + sha256 校验和 + ghcr 镜像 + GitHub
+Release）在推送后自动生效。
+
 ## Agent 宿主 MCP 接入（Claude Code / Codex / OpenCode）
 
 三个宿主复用同一个只读 MCP 构建产物 `dist/adapters/mcp/server.js`，宿主侧只有
