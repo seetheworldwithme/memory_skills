@@ -1,16 +1,10 @@
 {
   "mcpServers": {
     "memory-skills": {
-      "command": "node",
-      "args": [
-        "dist/adapters/mcp/server.js"
-      ],
-      "env": {
-        "MEMORY_SKILLS_URL": "${MEMORY_SKILLS_URL:-http://127.0.0.1:8421}",
-        "MEMORY_SKILLS_ACCESS_KEY": "${MEMORY_SKILLS_ACCESS_KEY}",
-        "MEMORY_SKILLS_USER_ID": "${MEMORY_SKILLS_USER_ID:-local-admin}",
-        "MEMORY_SKILLS_TEAM_ID": "${MEMORY_SKILLS_TEAM_ID:-local}",
-        "MEMORY_SKILLS_AGENT_ID": "${MEMORY_SKILLS_AGENT_ID:-default}"
+      "type": "http",
+      "url": "${MEMORY_SKILLS_MCP_URL:-http://127.0.0.1:8422/mcp}",
+      "headers": {
+        "Authorization": "Bearer ${MEMORY_SKILLS_ACCESS_KEY}"
       }
     }
   }
