@@ -2,7 +2,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
-import { accessKeyMatches, bearerToken } from "../auth/access-key.js";
+import { bearerToken } from "../auth/access-key.js";
+import { AuthService } from "../auth/auth-service.js";
+import { canPerform, scopeAllowed } from "../auth/authorization-policy.js";
+import type { AuthAction, Principal } from "../auth/principal.js";
 import type { GovernedStatus } from "../governance/lifecycle.js";
 import { MemoryService } from "../memory/memory-service.js";
 import { SkillService, SkillVersionConflictError } from "../skills/skill-service.js";
@@ -28,6 +31,11 @@ import type { SkillRunEventKind } from "../skills/skill-run-record.js";
 export function createMemorySkillsServer(options: {
   repository: SqliteRepository;
   accessKey: string;
+  /**
+   * 认证服务：注入后 Access Key 与团队 Token 都可认证；
+   * 缺省按纯本地模式组装（Access Key -> 全边界 local-admin）。
+   */
+  authService?: AuthService;
   webRoot?: string;
   eventSink?: EventSink;
   /** 模型 Provider：未注入时提案 API 返回 503，其余能力不受影响。 */
@@ -38,6 +46,7 @@ export function createMemorySkillsServer(options: {
   embedding?: { provider: EmbeddingProvider; index: VectorIndex; batchSize?: number };
 }): Server {
   if (!options.accessKey.trim()) throw new Error("accessKey must not be empty");
+  const auth = options.authService ?? new AuthService({ accessKey: options.accessKey });
   const memory = new MemoryService(options.repository);
   const skills = new SkillService(options.repository);
   const context = new ContextService(memory, skills, undefined, {
@@ -60,7 +69,7 @@ export function createMemorySkillsServer(options: {
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, memory, skills, context, proposals, embeddingSync, feedback, options.repository, options.accessKey, options.webRoot, options.eventSink, conflicts, retention, impact);
+      await route(request, response, memory, skills, context, proposals, embeddingSync, feedback, options.repository, auth, options.webRoot, options.eventSink, conflicts, retention, impact);
     } catch (error) {
       const status = error instanceof DomainError
         ? error.status
@@ -91,7 +100,7 @@ async function route(
   embeddingSync: EmbeddingSyncService | undefined,
   feedback: FeedbackService,
   repository: SqliteRepository,
-  accessKey: string,
+  auth: AuthService,
   webRoot?: string,
   eventSink?: EventSink,
   conflicts?: ConflictService,
@@ -107,33 +116,50 @@ async function route(
   }
 
   if (method === "POST" && url.pathname === "/v1/auth/login") {
+    // 登录同样走认证服务：本地 Access Key 与团队 Token 都能换取各自 Principal
     const body = await readJson(request) as { accessKey?: string };
-    if (!body.accessKey || !accessKeyMatches(body.accessKey, accessKey)) {
+    const principal = body.accessKey ? auth.authenticate(body.accessKey) : undefined;
+    if (!principal) {
       send(response, 401, { error: "UNAUTHORIZED", message: "invalid access key" });
       return;
     }
     send(response, 200, {
       authenticated: true,
-      user: { id: "local-admin", name: "Local Administrator" },
+      user: { id: principal.userId, name: principal.displayName ?? principal.userId },
+      // Task 15：登录即暴露身份与边界，供客户端自查权限；角色只来自认证，不可自报
+      principal: {
+        userId: principal.userId,
+        teamId: principal.teamId,
+        roles: principal.roles,
+        boundary: principal.boundary,
+        source: principal.source,
+      },
     });
     return;
   }
 
+  // 认证闸门：/v1/* 一律要求 Bearer Token（本地 Access Key 或团队 Token），
+  // 认证结果 Principal 是后续所有动作与作用域授权的唯一依据
+  let principal: Principal | undefined;
   if (url.pathname.startsWith("/v1/")) {
     const token = bearerToken(request.headers.authorization);
-    if (!token || !accessKeyMatches(token, accessKey)) {
+    principal = token ? auth.authenticate(token) : undefined;
+    if (!principal) {
       send(response, 401, { error: "UNAUTHORIZED", message: "authentication required" });
       return;
     }
   }
 
   if (method === "POST" && url.pathname === "/v1/evidence") {
-    send(response, 200, memory.capture(await readJson(request) as Parameters<MemoryService["capture"]>[0]));
+    const body = await readJson(request) as Parameters<MemoryService["capture"]>[0];
+    if (!authorize(principal!, "write", body.scope, response)) return;
+    send(response, 200, memory.capture(body));
     return;
   }
 
   if (method === "DELETE" && url.pathname.startsWith("/v1/evidence/")) {
     const body = await readJson(request) as { scope: Parameters<MemoryService["deleteEvidence"]>[1] };
+    if (!authorize(principal!, "write", body.scope, response)) return;
     const result = memory.deleteEvidence(decodeURIComponent(url.pathname.slice("/v1/evidence/".length)), body.scope);
     // 删除会批量改变派生资产状态，成功后同步一次该作用域的向量索引；
     // 同步失败只记事件，不影响删除结果
@@ -151,6 +177,7 @@ async function route(
   if (method === "POST" && evidenceImpact && impact) {
     // 删除前的只读影响预览：展示受影响资产与将被传播到的状态，不改动任何数据
     const body = await readJson(request) as { scope: Parameters<MemoryService["deleteEvidence"]>[1] };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     send(response, 200, impact.evidenceDeletion(decodeURIComponent(evidenceImpact[1]!), body.scope));
     return;
   }
@@ -161,6 +188,7 @@ async function route(
       scope: Parameters<MemoryService["deleteEvidence"]>[1];
       ids: string[];
     };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     if (!Array.isArray(body.ids)) {
       send(response, 400, { error: "BAD_REQUEST", message: "ids must be an array" });
       return;
@@ -173,12 +201,14 @@ async function route(
   }
 
   if (method === "POST" && (url.pathname === "/v1/proposals/memory/run" || url.pathname === "/v1/proposals/skill/run")) {
-    // 人工触发的提案 API：无论模型输出什么，只会创建 Draft，不会直接产生 Verified 资产
+    // 人工触发的提案 API：无论模型输出什么，只会创建 Draft，不会直接产生 Verified 资产；
+    // 先授权再探测 Provider，未授权者不应得知 LLM 是否配置
+    const input = await readJson(request) as ProposalJobInput;
+    if (!authorize(principal!, "write", input.scope, response)) return;
     if (!proposals) {
       send(response, 503, { error: "LLM_CONFIG_ERROR", message: "LLM Provider 未配置或初始化失败，提案功能不可用" });
       return;
     }
-    const input = await readJson(request) as ProposalJobInput;
     const report = url.pathname === "/v1/proposals/memory/run"
       ? await proposals.runMemoryProposal(input)
       : await proposals.runSkillProposal(input);
@@ -187,12 +217,15 @@ async function route(
   }
 
   if (method === "POST" && url.pathname === "/v1/memories") {
-    send(response, 200, memory.propose(await readJson(request) as Parameters<MemoryService["propose"]>[0]));
+    const body = await readJson(request) as Parameters<MemoryService["propose"]>[0];
+    if (!authorize(principal!, "write", body.scope, response)) return;
+    send(response, 200, memory.propose(body));
     return;
   }
 
   if (method === "POST" && url.pathname === "/v1/memories/get") {
     const body = await readJson(request) as { id: string; scope: Parameters<MemoryService["get"]>[1] };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     const item = memory.get(body.id, body.scope);
     send(response, item ? 200 : 404, item ?? { error: "NOT_FOUND", message: `memory not found: ${body.id}` });
     return;
@@ -200,6 +233,7 @@ async function route(
 
   if (method === "POST" && url.pathname === "/v1/memories/list") {
     const body = await readJson(request) as { scope: Parameters<MemoryService["list"]>[0] };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     send(response, 200, { items: memory.list(body.scope) });
     return;
   }
@@ -207,6 +241,7 @@ async function route(
   const memoryStatus = url.pathname.match(/^\/v1\/memories\/([^/]+)\/status$/);
   if (method === "POST" && memoryStatus) {
     const body = await readJson(request) as { scope: Parameters<MemoryService["transition"]>[1]; target: GovernedStatus };
+    if (!authorize(principal!, "review", body.scope, response)) return;
     const asset = memory.transition(decodeURIComponent(memoryStatus[1]!), body.scope, body.target);
     // 治理转换成功后自动同步向量索引：同步是索引维护而非提案/发布，
     // 失败只记事件，绝不影响治理操作本身的结果
@@ -222,22 +257,29 @@ async function route(
 
   if (method === "POST" && url.pathname === "/v1/recall") {
     const body = await readJson(request) as Parameters<MemoryService["recall"]>[0];
+    if (!authorize(principal!, "read", body.scope, response)) return;
+    if (!draftVisible(principal!, body.includeDraft === true, response)) return;
     send(response, 200, { items: memory.recall(body) });
     return;
   }
 
   if (method === "POST" && url.pathname === "/v1/context/recall") {
-    send(response, 200, await context.recall(await readJson(request) as Parameters<ContextService["recall"]>[0]));
+    const body = await readJson(request) as Parameters<ContextService["recall"]>[0];
+    if (!authorize(principal!, "read", body.scope, response)) return;
+    if (!draftVisible(principal!, body.includeDraft === true, response)) return;
+    send(response, 200, await context.recall(body));
     return;
   }
 
   if (method === "POST" && url.pathname === "/v1/retrieval/sync") {
-    // 人工触发的向量索引同步：只写入 embedding 元数据，不改动任何治理资产
+    // 人工触发的向量索引同步：只写入 embedding 元数据，不改动任何治理资产；
+    // 先授权再探测能力，未授权者不应得知 Embedding 是否配置
+    const body = await readJson(request) as { scope: Scope; includeDraft?: boolean };
+    if (!authorize(principal!, "write", body.scope, response)) return;
     if (!embeddingSync) {
       send(response, 503, { error: "EMBEDDING_CONFIG_ERROR", message: "Embedding Provider 未配置，向量同步不可用" });
       return;
     }
-    const body = await readJson(request) as { scope: Scope; includeDraft?: boolean };
     if (!body.scope || typeof body.scope !== "object") {
       send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
       return;
@@ -250,12 +292,15 @@ async function route(
   }
 
   if (method === "POST" && url.pathname === "/v1/skills") {
-    send(response, 200, skills.create(await readJson(request) as Parameters<SkillService["create"]>[0]));
+    const body = await readJson(request) as Parameters<SkillService["create"]>[0];
+    if (!authorize(principal!, "write", body.scope, response)) return;
+    send(response, 200, skills.create(body));
     return;
   }
 
   if (method === "POST" && url.pathname === "/v1/skills/get") {
     const body = await readJson(request) as { id: string; scope: Parameters<SkillService["get"]>[1] };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     const item = skills.get(body.id, body.scope);
     send(response, item ? 200 : 404, item ?? { error: "NOT_FOUND", message: `skill not found: ${body.id}` });
     return;
@@ -263,6 +308,7 @@ async function route(
 
   if (method === "POST" && url.pathname === "/v1/skills/list") {
     const body = await readJson(request) as { scope: Parameters<SkillService["list"]>[0] };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     send(response, 200, { items: skills.list(body.scope) });
     return;
   }
@@ -270,6 +316,7 @@ async function route(
   const skillUpdate = url.pathname.match(/^\/v1\/skills\/([^/]+)$/);
   if (method === "PUT" && skillUpdate) {
     const body = await readJson(request) as Omit<Parameters<SkillService["update"]>[0], "id">;
+    if (!authorize(principal!, "write", body.scope, response)) return;
     send(response, 200, skills.update({ ...body, id: decodeURIComponent(skillUpdate[1]!) }));
     return;
   }
@@ -277,6 +324,7 @@ async function route(
   const skillStatus = url.pathname.match(/^\/v1\/skills\/([^/]+)\/status$/);
   if (method === "POST" && skillStatus) {
     const body = await readJson(request) as { scope: Parameters<SkillService["transition"]>[1]; target: GovernedStatus };
+    if (!authorize(principal!, "review", body.scope, response)) return;
     const skill = skills.transition(decodeURIComponent(skillStatus[1]!), body.scope, body.target);
     // 与记忆转换一致：Verify/Reject 等状态变化后自动对齐向量索引
     await syncVectorsAfterTransition(embeddingSync, eventSink, {
@@ -296,6 +344,7 @@ async function route(
     const action = skillSubAction[2]!;
     if (action === "versions") {
       const body = await readJson(request) as { scope: Parameters<SkillService["listVersions"]>[1] };
+      if (!authorize(principal!, "read", body.scope, response)) return;
       send(response, 200, { items: skills.listVersions(skillId, body.scope) });
       return;
     }
@@ -305,6 +354,7 @@ async function route(
         fromVersion?: number;
         toVersion?: number;
       };
+      if (!authorize(principal!, "read", body.scope, response)) return;
       send(response, 200, skills.diff(skillId, body.scope, {
         ...(body.fromVersion === undefined ? {} : { fromVersion: body.fromVersion }),
         ...(body.toVersion === undefined ? {} : { toVersion: body.toVersion }),
@@ -316,6 +366,7 @@ async function route(
         scope: Parameters<SkillService["rollback"]>[1];
         targetVersion: number;
       };
+      if (!authorize(principal!, "review", body.scope, response)) return;
       if (!Number.isInteger(body.targetVersion) || body.targetVersion <= 0) {
         send(response, 400, { error: "BAD_REQUEST", message: "targetVersion must be a positive integer" });
         return;
@@ -333,6 +384,7 @@ async function route(
     }
     if (action === "validate") {
       const body = await readJson(request) as { scope: Parameters<SkillService["validate"]>[1] };
+      if (!authorize(principal!, "read", body.scope, response)) return;
       send(response, 200, skills.validate(skillId, body.scope));
       return;
     }
@@ -343,6 +395,8 @@ async function route(
         requestId?: string;
         note?: string;
       };
+      // 使用记录是使用证据采集（与显式反馈同级），不改变资产状态，read 即可
+      if (!authorize(principal!, "read", body.scope, response)) return;
       if (!body.event) {
         send(response, 400, { error: "BAD_REQUEST", message: "event is required" });
         return;
@@ -358,6 +412,7 @@ async function route(
     }
     // run-summary
     const body = await readJson(request) as { scope: Parameters<SkillService["runSummary"]>[1] };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     send(response, 200, skills.runSummary(skillId, body.scope));
     return;
   }
@@ -368,13 +423,15 @@ async function route(
       scope: Parameters<SkillService["search"]>[1];
       includeDraft?: boolean;
     };
+    if (!authorize(principal!, "read", body.scope, response)) return;
+    if (!draftVisible(principal!, body.includeDraft === true, response)) return;
     send(response, 200, { items: skills.search(body.query, body.scope, body.includeDraft) });
     return;
   }
 
   if (method === "POST" && url.pathname === "/v1/feedback") {
     // 显式反馈：只采集人工判断（四分类 + 关联召回请求与资产版本），
-    // 不触发任何资产状态或内容的自动变更
+    // 不触发任何资产状态或内容的自动变更；read 即可提交，鼓励所有能读取的身份反馈
     const body = await readJson(request) as {
       id?: string;
       assetKind: FeedbackAssetKind;
@@ -384,6 +441,7 @@ async function route(
       requestId?: string;
       comment?: string;
     };
+    if (!authorize(principal!, "read", body.scope, response)) return;
     if (!body.scope || typeof body.scope !== "object") {
       send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
       return;
@@ -398,6 +456,7 @@ async function route(
 
   if (method === "POST" && url.pathname === "/v1/feedback/list") {
     const body = await readJson(request) as { scope: Scope };
+    if (!authorize(principal!, "review", body.scope, response)) return;
     if (!body.scope || typeof body.scope !== "object") {
       send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
       return;
@@ -407,8 +466,10 @@ async function route(
   }
 
   // Task 14：治理任务（冲突/重复扫描）、保留策略（过期待复核/续期）
+  // 治理工作台数据（含资产内容摘要）只对具备审核能力的角色开放
   if (method === "POST" && url.pathname === "/v1/governance/conflicts") {
     const body = await readJson(request) as { scope: Scope };
+    if (!authorize(principal!, "review", body.scope, response)) return;
     if (!body.scope || typeof body.scope !== "object") {
       send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
       return;
@@ -419,6 +480,7 @@ async function route(
 
   if (method === "POST" && url.pathname === "/v1/governance/retention/review") {
     const body = await readJson(request) as { scope: Scope; staleDays?: number };
+    if (!authorize(principal!, "review", body.scope, response)) return;
     if (!body.scope || typeof body.scope !== "object") {
       send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
       return;
@@ -431,6 +493,7 @@ async function route(
 
   if (method === "POST" && url.pathname === "/v1/governance/retention/deprecate-expired") {
     const body = await readJson(request) as { scope: Scope };
+    if (!authorize(principal!, "review", body.scope, response)) return;
     if (!body.scope || typeof body.scope !== "object") {
       send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
       return;
@@ -453,6 +516,7 @@ async function route(
       scope: Parameters<RetentionService["renewMemory"]>[1];
       validUntil?: string | null;
     };
+    if (!authorize(principal!, "review", body.scope, response)) return;
     const asset = retention!.renewMemory(decodeURIComponent(memoryRenew[1]!), body.scope, {
       ...(body.validUntil === undefined ? {} : { validUntil: body.validUntil }),
     });
@@ -470,6 +534,41 @@ async function route(
   if (method === "GET" && !url.pathname.startsWith("/v1/") && webRoot && await serveWeb(response, webRoot, url.pathname)) return;
 
   send(response, 404, { error: "NOT_FOUND", message: "route not found" });
+}
+
+/**
+ * 端点授权（Task 15）：动作授权 + 作用域边界检查，顺序固定为先动作后作用域。
+ * 失败时已写入 403 响应并返回 false，路由据此终止；
+ * 作用域判定只认认证得到的 Principal，请求体自报的作用域越界即拒绝，
+ * 缺失/非法作用域跳过边界检查，交由后续参数校验兜底。
+ */
+function authorize(
+  principal: Principal,
+  action: AuthAction,
+  scope: Scope | undefined,
+  response: ServerResponse,
+): boolean {
+  if (!canPerform(principal, action)) {
+    send(response, 403, {
+      error: "FORBIDDEN_ACTION",
+      message: `角色 ${principal.roles.join("/")} 不允许执行 ${action} 操作`,
+    });
+    return false;
+  }
+  if (scope !== undefined && typeof scope === "object" && !scopeAllowed(principal, scope)) {
+    send(response, 403, { error: "FORBIDDEN_SCOPE", message: "请求作用域超出认证身份的边界" });
+    return false;
+  }
+  return true;
+}
+
+/** Draft 可见性属于审核能力：只有 review 及以上角色才能请求 includeDraft=true。 */
+function draftVisible(principal: Principal, requested: boolean, response: ServerResponse): boolean {
+  if (requested && !canPerform(principal, "review")) {
+    send(response, 403, { error: "FORBIDDEN_ACTION", message: "Draft 资产仅对具备审核角色的身份可见" });
+    return false;
+  }
+  return true;
 }
 
 /**

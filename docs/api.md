@@ -3,7 +3,15 @@
 All endpoints accept and return JSON.
 
 All `/v1/*` endpoints except login require
-`Authorization: Bearer <MEMORY_SKILLS_ACCESS_KEY>`.
+`Authorization: Bearer <token>`。Token 有两种（Task 15）：
+
+- 本地 Access Key（`MEMORY_SKILLS_ACCESS_KEY`）：映射为全边界 `local-admin`（admin 角色），兼容单人本地模式；
+- 团队 Token（`MEMORY_SKILLS_AUTH_TOKENS_FILE` 中登记的哈希）：映射为配置文件声明的身份（admin/reviewer/reader），作用域边界由配置决定。
+
+每个请求还要通过两层授权，失败返回 403：
+
+- `FORBIDDEN_ACTION`：角色不允许该端点的动作（read/review/write，角色矩阵见 `docs/security-model.md`）；
+- `FORBIDDEN_SCOPE`：请求体自报的作用域（teamId/userId/agentId）超出认证身份的边界。作用域的权威来源是认证身份，不再是请求体。
 
 ## Login
 
@@ -13,6 +21,22 @@ POST /v1/auth/login
 
 ```json
 { "accessKey": "configured-access-key" }
+```
+
+成功响应在兼容字段之外附带认证身份（角色与边界只来自认证结果，无法自报）：
+
+```json
+{
+  "authenticated": true,
+  "user": { "id": "local-admin", "name": "Local Administrator" },
+  "principal": {
+    "userId": "local-admin",
+    "teamId": "local",
+    "roles": ["admin"],
+    "boundary": { "teamIds": "*", "userIds": "*", "agentIds": "*" },
+    "source": "local-access-key"
+  }
+}
 ```
 
 ## Health
@@ -81,6 +105,8 @@ POST /v1/recall
 ```
 
 Draft memory is excluded unless `includeDraft` is explicitly true.
+`includeDraft: true` 属于审核能力：只有具备 review 动作的角色（admin/reviewer）
+可用，reader 请求会得到 403 `FORBIDDEN_ACTION`。
 
 ## Unified context recall
 

@@ -11,3 +11,8 @@ export function bearerToken(authorization: string | undefined): string | null {
   const token = authorization.slice("Bearer ".length).trim();
   return token.length > 0 ? token : null;
 }
+
+/** 团队 Token 的存储形态哈希：配置文件只存该值，明文只在签发时出现一次。 */
+export function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}

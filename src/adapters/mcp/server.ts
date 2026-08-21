@@ -31,6 +31,8 @@ export function createMemorySkillsMcpServer(options: {
 export { defaultScopeFromEnv } from "./tool-policy.js";
 
 if (isMainModule()) {
+  // 认证来源见 http-client.ts：团队模式用 MEMORY_SKILLS_AUTH_TOKEN（建议签发 reader 只读 Token），
+  // 本地模式回落 MEMORY_SKILLS_ACCESS_KEY；作用域仍由环境变量在服务端绑定
   const client = MemorySkillsHttpClient.fromEnv();
   serveStdio(() => createMemorySkillsMcpServer({ client, defaultScope: defaultScopeFromEnv() }), {
     onerror: (error) => console.error(`[memory-skills-mcp] ${error.message}`),

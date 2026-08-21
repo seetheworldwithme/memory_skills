@@ -26,9 +26,20 @@ test("access-key login protects domain APIs", async () => {
       body: JSON.stringify({ accessKey: "test-secret-key" }),
     });
     assert.equal(acceptedLogin.status, 200);
-    assert.deepEqual(await acceptedLogin.json(), {
-      authenticated: true,
-      user: { id: "local-admin", name: "Local Administrator" },
+    // Task 15：login 响应附带认证身份（角色与作用域边界），字段只来自认证结果
+    const loginBody = await acceptedLogin.json() as {
+      authenticated: boolean;
+      user: { id: string; name: string };
+      principal: { userId: string; teamId: string; roles: string[]; source: string };
+    };
+    assert.equal(loginBody.authenticated, true);
+    assert.deepEqual(loginBody.user, { id: "local-admin", name: "Local Administrator" });
+    assert.deepEqual(loginBody.principal, {
+      userId: "local-admin",
+      teamId: "local",
+      roles: ["admin"],
+      boundary: { teamIds: "*", userIds: "*", agentIds: "*" },
+      source: "local-access-key",
     });
 
     const anonymous = await fetch(`${base}/v1/memories/list`, {

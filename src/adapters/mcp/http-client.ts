@@ -28,9 +28,13 @@ export class MemorySkillsHttpClient {
   static fromEnv(environment: Environment = process.env): MemorySkillsHttpClient {
     const baseUrl = environment.MEMORY_SKILLS_URL?.trim();
     if (!baseUrl) throw new Error("MEMORY_SKILLS_URL is required for the MCP adapter");
-    const accessKey = environment.MEMORY_SKILLS_ACCESS_KEY?.trim();
-    if (!accessKey) throw new Error("MEMORY_SKILLS_ACCESS_KEY is required for the MCP adapter");
-    return new MemorySkillsHttpClient({ baseUrl, accessKey });
+    // 团队模式：优先使用显式认证 Token（通常签发为 reader，Agent 天然无法越权写入）；
+    // 未配置时回落本地 Access Key（admin，仅限本地单人模式）
+    const token = environment.MEMORY_SKILLS_AUTH_TOKEN?.trim() || environment.MEMORY_SKILLS_ACCESS_KEY?.trim();
+    if (!token) {
+      throw new Error("MEMORY_SKILLS_AUTH_TOKEN or MEMORY_SKILLS_ACCESS_KEY is required for the MCP adapter");
+    }
+    return new MemorySkillsHttpClient({ baseUrl, accessKey: token });
   }
 
   recallContext(input: ContextRecallInput): Promise<ContextRecallResponse> {

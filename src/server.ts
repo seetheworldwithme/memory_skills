@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import { createMemorySkillsServer } from "./api/http-server.js";
+import { resolveAuthServiceFromEnv } from "./auth/auth-service.js";
 import { SqliteRepository } from "./storage/sqlite-repository.js";
 import { resolveEventSinkFromEnv } from "./observability/jsonl-event-sink.js";
 import { EVENT_SCHEMA_VERSION } from "./observability/events.js";
@@ -52,9 +53,13 @@ try {
   console.error(`检索层初始化失败，保持词法检索：${error instanceof Error ? error.message : String(error)}`);
 }
 
+// 组装认证服务（Task 15）：本地 Access Key 必有，团队 Token 文件可选；
+// 配置文件存在但解析失败直接终止启动，绝不静默降级为纯本地模式
+resolveAuthServiceFromEnv(process.env).then((authService) => {
 const server = createMemorySkillsServer({
   repository,
   accessKey,
+  authService,
   webRoot,
   eventSink,
   ...(llmProvider !== undefined ? { llmProvider } : {}),
@@ -85,3 +90,8 @@ function shutdown(): void {
 
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
+}).catch((error: unknown) => {
+  console.error(`认证配置加载失败，服务拒绝启动：${error instanceof Error ? error.message : String(error)}`);
+  repository.close();
+  process.exit(1);
+});
