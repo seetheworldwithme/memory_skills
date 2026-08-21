@@ -31,11 +31,17 @@ import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 import { closeSync, createReadStream, openSync } from "node:fs";
 
-/** 每条消息截断上限与摘要总量上限：Evidence 是索引不是全文归档。 */
-const PER_MESSAGE_CHAR_LIMIT = 800;
-const TOTAL_CHAR_LIMIT = 16_000;
-const MAX_USER_MESSAGES = 30;
-const MAX_ASSISTANT_MESSAGES = 10;
+/**
+ * 捕获策略（2026-08-21 按用户决策改为全量捕获）：
+ * - 不限消息条数、单条消息不截断——取舍交给提取层，钩子层保持完整事实来源
+ *   （旧版"前 10 条助手消息 + 每条 800 字"曾把会话结尾的完成摘要整段丢掉）；
+ * - 每个角色仅设保底预算：超预算时保留尾部消息（结论与完成摘要几乎总在会话
+ *   结尾）并在摘要头注明省略条数，防止异常超长转录刷库；
+ * - 摘要按块切分存证（每块 ≤ CHUNK_CHAR_LIMIT）：块大小对齐提案层
+ *   "单条证据 2000 字"的喂入预算，保证每块都能完整进入模型。
+ */
+const PER_ROLE_CHAR_BUDGET = 60_000;
+const CHUNK_CHAR_LIMIT = 1_800;
 const FETCH_TIMEOUT_MS = 5_000;
 /** 提案请求（真实模型调用）的超时：显著长于普通请求。 */
 const PROPOSAL_TIMEOUT_MS = 30_000;
@@ -75,35 +81,29 @@ async function main() {
   };
 
   const { userTexts, assistantTexts } = await extractTranscript(payload.transcript_path);
-  // 证据 ID 携带内容指纹：同一会话重复触发且摘要未变时幂等，摘要变化时生成新证据而不是冲突报错
   const sessionId = String(payload.session_id);
 
+  // 每个角色的摘要可能切成多块证据（每块 ≤ CHUNK_CHAR_LIMIT），全部记入 capturedIds
   const capturedIds = [];
-  if (userTexts.length > 0) {
-    const id = evidenceId(sessionId, "user", userTexts);
-    await captureEvidence({
-      id,
-      role: "user",
-      content: formatDigest("用户消息", userTexts),
-      baseUrl,
-      accessKey,
-      scope,
-      originSessionId: sessionId,
-    });
-    capturedIds.push(id);
-  }
-  if (assistantTexts.length > 0) {
-    const id = evidenceId(sessionId, "assistant", assistantTexts);
-    await captureEvidence({
-      id,
-      role: "assistant",
-      content: formatDigest("助手回复（节选）", assistantTexts),
-      baseUrl,
-      accessKey,
-      scope,
-      originSessionId: sessionId,
-    });
-    capturedIds.push(id);
+  const roles = [
+    ["user", "用户消息", userTexts],
+    ["assistant", "助手回复", assistantTexts],
+  ];
+  for (const [role, title, texts] of roles) {
+    if (texts.length === 0) continue;
+    const baseId = evidenceId(sessionId, role, texts);
+    for (const part of chunkDigest(title, texts, baseId)) {
+      await captureEvidence({
+        id: part.id,
+        role,
+        content: part.content,
+        baseUrl,
+        accessKey,
+        scope,
+        originSessionId: sessionId,
+      });
+      capturedIds.push(part.id);
+    }
   }
 
   // 会话结束自动提案（显式 opt-in，产生真实模型费用）：
@@ -126,7 +126,6 @@ async function extractTranscript(transcriptPath) {
   const readline = createInterface({ input: createReadStream(transcriptPath, { encoding: "utf8" }), crlfDelay: Infinity });
   try {
     for await (const line of readline) {
-      if (userTexts.length >= MAX_USER_MESSAGES && assistantTexts.length >= MAX_ASSISTANT_MESSAGES) break;
       const trimmed = line.trim();
       if (!trimmed) continue;
       let entry;
@@ -273,16 +272,63 @@ function plainText(content) {
   return "";
 }
 
-function formatDigest(title, texts) {
-  const lines = [`Claude Code 会话摘要（SessionEnd 自动捕获）`, ``, `## ${title}`, ``];
-  let used = 0;
-  for (const text of texts) {
-    const clipped = text.length > PER_MESSAGE_CHAR_LIMIT ? `${text.slice(0, PER_MESSAGE_CHAR_LIMIT)}…` : text;
-    if (used + clipped.length > TOTAL_CHAR_LIMIT) break;
-    lines.push(`- ${clipped.replace(/\n+/g, " ").trim()}`);
-    used += clipped.length;
+/**
+ * 把一个角色的全部消息构建成分块证据：
+ * - 全量消息入块；超预算时只保留尾部消息，并在每块头部注明省略条数；
+ * - 单条超长消息硬切跨块，保证每块（含块头）不超过 CHUNK_CHAR_LIMIT；
+ * - 单块时沿用旧版无后缀 ID（与既有证据幂等兼容），多块加 -p{k}of{n} 后缀。
+ */
+function chunkDigest(title, texts, baseId) {
+  let omitted = 0;
+  let selected = texts;
+  const totalLength = texts.reduce((sum, text) => sum + text.length + 2, 0);
+  if (totalLength > PER_ROLE_CHAR_BUDGET) {
+    const kept = [];
+    let used = 0;
+    for (let i = texts.length - 1; i >= 0; i -= 1) {
+      const text = texts[i];
+      // 首条必保（哪怕超预算）：块切分兜底，不让任何角色产出空证据
+      if (kept.length > 0 && used + text.length + 2 > PER_ROLE_CHAR_BUDGET - 200) break;
+      kept.unshift(text);
+      used += text.length + 2;
+    }
+    omitted = texts.length - kept.length;
+    selected = kept;
   }
-  return lines.join("\n");
+
+  const bullets = selected.map((text) => `- ${text.replace(/\n+/g, " ").trim()}`);
+  const parts = [];
+  let current = [];
+  let usedChars = 0;
+  const flush = () => {
+    if (current.length > 0) parts.push(current);
+    current = [];
+    usedChars = 0;
+  };
+  for (const bullet of bullets) {
+    if (bullet.length > CHUNK_CHAR_LIMIT) {
+      flush();
+      for (let i = 0; i < bullet.length; i += CHUNK_CHAR_LIMIT) parts.push([bullet.slice(i, i + CHUNK_CHAR_LIMIT)]);
+      continue;
+    }
+    // 每块预留 120 字给块头（标题 + 省略说明）
+    if (usedChars + bullet.length + 1 > CHUNK_CHAR_LIMIT - 120) flush();
+    current.push(bullet);
+    usedChars += bullet.length + 1;
+  }
+  flush();
+  if (parts.length === 0) parts.push([]);
+
+  return parts.map((lines, index) => ({
+    id: parts.length === 1 ? baseId : `${baseId}-p${index + 1}of${parts.length}`,
+    content: [
+      "Claude Code 会话摘要（SessionEnd 自动捕获 · 全量）",
+      "",
+      `## ${title} · 第 ${index + 1}/${parts.length} 部分${omitted > 0 ? `（开头 ${omitted} 条因超出预算省略）` : ""}`,
+      "",
+      ...lines,
+    ].join("\n"),
+  }));
 }
 
 function evidenceId(sessionId, role, texts) {

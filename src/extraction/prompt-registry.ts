@@ -40,13 +40,15 @@ export type SkillCandidate = z.infer<typeof skillCandidateSchema>;
 
 export const MEMORY_EXTRACTION_PROMPT: ExtractionPrompt<{ candidates: MemoryCandidate[] }> = {
   task: "memory-extraction",
-  promptVersion: "memory-extraction-v1",
+  promptVersion: "memory-extraction-v2",
   schemaName: "memory_candidates",
   schema: z.object({ candidates: z.array(memoryCandidateSchema) }),
   systemPrompt: [
     "你从对话证据中提取用户的长期记忆候选（事实、偏好、项目决策）。",
     "规则：",
     "- 只提取稳定、可长期复用的信息；忽略一次性闲聊、临时状态和与用户无关的内容；",
+    "- 已完成的工作与里程碑（如某项修复/功能已落地、验证通过、关键提交号）属于项目事实，",
+    "  应单独成条而不是并入泛化的偏好总结；",
     "- layer 含义：l1=具体事实与偏好，l2=主题层面的规律总结，l3=全局画像；不确定时用 l1；",
     "- content 用简洁的中文陈述句，独立可读，不要写“用户说过”这类转述前缀；",
     "- confidence 为 0 到 1 之间的置信度；reason 简要说明提取依据；",

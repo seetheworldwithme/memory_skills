@@ -69,7 +69,7 @@ test("记忆提案：模型候选经校验后创建 Draft，证据编号映射�
 
   assert.equal(report.kind, "memory");
   assert.equal(report.model, "mock-model");
-  assert.equal(report.promptVersion, "memory-extraction-v1");
+  assert.equal(report.promptVersion, "memory-extraction-v2");
   assert.deepEqual(report.inputEvidenceIds, evidenceIds);
   // 两个候选都通过了服务端硬校验（"是否临时状态"这类语义判断由 Prompt 约束模型）
   assert.equal(report.created.length, 2);

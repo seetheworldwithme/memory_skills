@@ -152,8 +152,10 @@ detect:pi` 复核）。
 ## SessionEnd 半自动捕获（Evidence 层 + 可选即时审核）
 
 有价值对话无需再手动 POST：`scripts/session-end-capture.mjs` 在 Claude Code
-会话结束时读取转录文件，把用户消息与助手回复的摘要自动送入
-`POST /v1/evidence`（携带来源会话 `originSessionId`，供多会话佐证规则使用）。
+会话结束时读取转录文件，把用户消息与助手回复**全量**（不限条数、单条不截断，
+超保底预算时保尾部并注明省略）按 1800 字分块自动送入
+`POST /v1/evidence`（携带来源会话 `originSessionId`，供多会话佐证规则使用；
+块大小对齐提案层"单条证据 2000 字"的喂入预算，保证每块都能完整进入模型）。
 
 设置 `MEMORY_SKILLS_SESSION_PROPOSALS=1` 后（显式 opt-in，提案会产生真实
 模型费用），hook 在捕获证据后自动触发 `POST /v1/proposals/memory/run`：

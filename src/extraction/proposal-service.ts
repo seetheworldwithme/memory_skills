@@ -17,12 +17,12 @@ import {
 } from "./prompt-registry.js";
 import { isDuplicateContent, normalizeForDedup, validateMemoryCandidate, validateSkillCandidate } from "./validators.js";
 
-/** 每条证据正文送入模型前的截断长度。 */
+/** 每条证据正文送入模型前的截断长度（钩子按 1800 字分块存证，对齐此预算可整块进模型）。 */
 const MAX_EVIDENCE_CHARS = 2_000;
-/** 全部证据拼接后的总字符预算。 */
-const MAX_TOTAL_EVIDENCE_CHARS = 24_000;
-/** 未显式指定证据时默认取最近多少条。 */
-const DEFAULT_MAX_EVIDENCE = 20;
+/** 全部证据拼接后的总字符预算（2026-08-21 全量捕获后从 24K 放大，容纳长会话的分块证据）。 */
+const MAX_TOTAL_EVIDENCE_CHARS = 48_000;
+/** 未显式指定证据时默认取最近多少条（同上放大：长会话单次即可产出数十块证据）。 */
+const DEFAULT_MAX_EVIDENCE = 50;
 
 /**
  * Evidence 到 Draft 的提案流水线（人工触发）。

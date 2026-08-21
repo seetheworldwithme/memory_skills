@@ -43,7 +43,7 @@ export interface ProposalJobInput {
   scope: Scope;
   /** 显式指定证据 ID；缺省时取该作用域最近的证据。 */
   evidenceIds?: string[];
-  /** 缺省取最近证据时的条数上限，默认 20。 */
+  /** 缺省取最近证据时的条数上限，默认 50（全量捕获后长会话会产出多块证据）。 */
   maxEvidence?: number;
 }
 
