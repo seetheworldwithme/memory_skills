@@ -13,7 +13,11 @@ export type ObservabilityEventType =
   | "context.recall.failed"
   | "retrieval.auto_sync.completed"
   | "retrieval.auto_sync.failed"
-  | "event.redacted";
+  | "event.redacted"
+  | "audit.login_failed"
+  | "audit.denied"
+  | "audit.state_changed"
+  | "audit.proposal_run";
 
 /** 事件公共信封字段，所有事件都必须携带。 */
 interface EventEnvelope {
@@ -98,13 +102,60 @@ export interface RetrievalAutoSyncFailedEvent extends EventEnvelope {
   errorName: string;
 }
 
+/** 登录失败审计：只记来源与原因，绝不记录提交的凭据值（Task 16）。 */
+export interface AuditLoginFailedEvent extends EventEnvelope {
+  eventType: "audit.login_failed";
+  /** 请求来源地址；本地部署下通常是 127.0.0.1。 */
+  remoteAddress: string;
+  reason: string;
+}
+
+/** 授权拒绝审计（401/403）：谁在哪个端点被什么原因拒绝（Task 16）。 */
+export interface AuditDeniedEvent extends EventEnvelope {
+  eventType: "audit.denied";
+  /** 认证身份的用户 ID；未通过认证的请求记为 anonymous。 */
+  userId: string;
+  path: string;
+  /** 拒绝原因码：UNAUTHORIZED / FORBIDDEN_ACTION / FORBIDDEN_SCOPE。 */
+  code: string;
+  /** 被拒绝的动作（401 时可能未知，可省略）。 */
+  action?: string;
+}
+
+/** 治理状态变更审计：谁把哪个资产从什么状态转成什么状态（Task 16）。 */
+export interface AuditStateChangedEvent extends EventEnvelope {
+  eventType: "audit.state_changed";
+  userId: string;
+  assetKind: "memory" | "skill" | "evidence";
+  assetId: string;
+  scope: Scope;
+  /** 变更来源端点（memory.transition / skill.rollback / evidence.delete 等）。 */
+  trigger: string;
+  /** 变更前状态；批量传播或来源不可考时为 unknown。 */
+  from: string;
+  to: string;
+}
+
+/** 模型提案审计：谁触发了一次提案、成功与否（Task 16）。不记 Prompt 与输出正文。 */
+export interface AuditProposalRunEvent extends EventEnvelope {
+  eventType: "audit.proposal_run";
+  userId: string;
+  kind: "memory" | "skill";
+  ok: boolean;
+  errorCode?: string;
+}
+
 export type ObservabilityEvent =
   | ServiceStartedEvent
   | ContextRecallCompletedEvent
   | ContextRecallFailedEvent
   | RetrievalAutoSyncCompletedEvent
   | RetrievalAutoSyncFailedEvent
-  | EventRedactedEvent;
+  | EventRedactedEvent
+  | AuditLoginFailedEvent
+  | AuditDeniedEvent
+  | AuditStateChangedEvent
+  | AuditProposalRunEvent;
 
 /**
  * 每种事件允许输出的字段白名单。
@@ -123,6 +174,10 @@ const FIELD_ALLOWLIST: Record<ObservabilityEventType, readonly string[]> = {
   "retrieval.auto_sync.completed": ["trigger", "assetKind", "assetId", "scope", "embedded", "removed"],
   "retrieval.auto_sync.failed": ["trigger", "assetKind", "assetId", "scope", "errorCode", "errorName"],
   "event.redacted": ["originalEventType", "reason"],
+  "audit.login_failed": ["remoteAddress", "reason"],
+  "audit.denied": ["userId", "path", "code", "action"],
+  "audit.state_changed": ["userId", "assetKind", "assetId", "scope", "trigger", "from", "to"],
+  "audit.proposal_run": ["userId", "kind", "ok", "errorCode"],
 };
 
 /** 按白名单投影事件并序列化为单行 JSON，供 JSONL 输出使用。 */

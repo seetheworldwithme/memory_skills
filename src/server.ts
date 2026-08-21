@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 
 import { createMemorySkillsServer } from "./api/http-server.js";
 import { resolveAuthServiceFromEnv } from "./auth/auth-service.js";
+import { AuditService } from "./security/audit-service.js";
+import { RateLimiter, resolveRateLimitRulesFromEnv } from "./security/rate-limit.js";
 import { SqliteRepository } from "./storage/sqlite-repository.js";
 import { resolveEventSinkFromEnv } from "./observability/jsonl-event-sink.js";
 import { EVENT_SCHEMA_VERSION } from "./observability/events.js";
@@ -56,10 +58,14 @@ try {
 // 组装认证服务（Task 15）：本地 Access Key 必有，团队 Token 文件可选；
 // 配置文件存在但解析失败直接终止启动，绝不静默降级为纯本地模式
 resolveAuthServiceFromEnv(process.env).then((authService) => {
+  // 安全组件（Task 16）：限流规则可由环境变量收紧/放宽；审计事件走同一事件通道
+  const rateLimiter = new RateLimiter(resolveRateLimitRulesFromEnv(process.env));
+  const audit = new AuditService(eventSink);
 const server = createMemorySkillsServer({
   repository,
   accessKey,
   authService,
+  security: { rateLimiter, audit },
   webRoot,
   eventSink,
   ...(llmProvider !== undefined ? { llmProvider } : {}),

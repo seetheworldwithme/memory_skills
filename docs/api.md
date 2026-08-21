@@ -13,6 +13,8 @@ All `/v1/*` endpoints except login require
 - `FORBIDDEN_ACTION`：角色不允许该端点的动作（read/review/write，角色矩阵见 `docs/security-model.md`）；
 - `FORBIDDEN_SCOPE`：请求体自报的作用域（teamId/userId/agentId）超出认证身份的边界。作用域的权威来源是认证身份，不再是请求体。
 
+此外有速率限制（Task 16）：登录尝试/登录失败按来源地址计数，写域（捕获、创建、提案、状态转换）与读域（查询、召回）按身份计数；超限返回 429 `RATE_LIMITED` 并带 `Retry-After` 头。默认阈值与环境变量见 `docs/threat-model.md`。所有授权拒绝、登录失败、治理状态变更与模型提案都会产出 `audit.*` 审计事件（不含密钥与资产正文）。
+
 ## Login
 
 ```http
