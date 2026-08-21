@@ -20,6 +20,10 @@ import type { AssetKind, EmbeddingProvider, Retriever, VectorIndex } from "../re
 import type { Scope } from "../governance/types.js";
 import { FeedbackService } from "../feedback/feedback-service.js";
 import type { FeedbackAssetKind, FeedbackKind } from "../feedback/types.js";
+import { ConflictService } from "../governance/conflict-service.js";
+import { RetentionService } from "../governance/retention-service.js";
+import { ImpactAnalysis } from "../governance/impact-analysis.js";
+import type { SkillRunEventKind } from "../skills/skill-run-record.js";
 
 export function createMemorySkillsServer(options: {
   repository: SqliteRepository;
@@ -50,10 +54,13 @@ export function createMemorySkillsServer(options: {
     })
     : undefined;
   const feedback = new FeedbackService(options.repository);
+  const conflicts = new ConflictService(options.repository);
+  const retention = new RetentionService(options.repository);
+  const impact = new ImpactAnalysis(options.repository);
 
   return createServer(async (request, response) => {
     try {
-      await route(request, response, memory, skills, context, proposals, embeddingSync, feedback, options.repository, options.accessKey, options.webRoot, options.eventSink);
+      await route(request, response, memory, skills, context, proposals, embeddingSync, feedback, options.repository, options.accessKey, options.webRoot, options.eventSink, conflicts, retention, impact);
     } catch (error) {
       const status = error instanceof DomainError
         ? error.status
@@ -87,6 +94,9 @@ async function route(
   accessKey: string,
   webRoot?: string,
   eventSink?: EventSink,
+  conflicts?: ConflictService,
+  retention?: RetentionService,
+  impact?: ImpactAnalysis,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
@@ -124,7 +134,24 @@ async function route(
 
   if (method === "DELETE" && url.pathname.startsWith("/v1/evidence/")) {
     const body = await readJson(request) as { scope: Parameters<MemoryService["deleteEvidence"]>[1] };
-    send(response, 200, memory.deleteEvidence(decodeURIComponent(url.pathname.slice("/v1/evidence/".length)), body.scope));
+    const result = memory.deleteEvidence(decodeURIComponent(url.pathname.slice("/v1/evidence/".length)), body.scope);
+    // 删除会批量改变派生资产状态，成功后同步一次该作用域的向量索引；
+    // 同步失败只记事件，不影响删除结果
+    await syncVectorsAfterTransition(embeddingSync, eventSink, {
+      trigger: "evidence.delete",
+      assetKind: "memory",
+      assetId: result.evidenceId,
+      scope: body.scope,
+    });
+    send(response, 200, result);
+    return;
+  }
+
+  const evidenceImpact = url.pathname.match(/^\/v1\/evidence\/([^/]+)\/impact$/);
+  if (method === "POST" && evidenceImpact && impact) {
+    // 删除前的只读影响预览：展示受影响资产与将被传播到的状态，不改动任何数据
+    const body = await readJson(request) as { scope: Parameters<MemoryService["deleteEvidence"]>[1] };
+    send(response, 200, impact.evidenceDeletion(decodeURIComponent(evidenceImpact[1]!), body.scope));
     return;
   }
 
@@ -262,6 +289,79 @@ async function route(
     return;
   }
 
+  // Task 13：Skill 版本差异 / 回滚 / 质量校验 / 使用记录 / 使用效果
+  const skillSubAction = url.pathname.match(/^\/v1\/skills\/([^/]+)\/(versions|diff|rollback|validate|runs|run-summary)$/);
+  if (method === "POST" && skillSubAction) {
+    const skillId = decodeURIComponent(skillSubAction[1]!);
+    const action = skillSubAction[2]!;
+    if (action === "versions") {
+      const body = await readJson(request) as { scope: Parameters<SkillService["listVersions"]>[1] };
+      send(response, 200, { items: skills.listVersions(skillId, body.scope) });
+      return;
+    }
+    if (action === "diff") {
+      const body = await readJson(request) as {
+        scope: Parameters<SkillService["diff"]>[1];
+        fromVersion?: number;
+        toVersion?: number;
+      };
+      send(response, 200, skills.diff(skillId, body.scope, {
+        ...(body.fromVersion === undefined ? {} : { fromVersion: body.fromVersion }),
+        ...(body.toVersion === undefined ? {} : { toVersion: body.toVersion }),
+      }));
+      return;
+    }
+    if (action === "rollback") {
+      const body = await readJson(request) as {
+        scope: Parameters<SkillService["rollback"]>[1];
+        targetVersion: number;
+      };
+      if (!Number.isInteger(body.targetVersion) || body.targetVersion <= 0) {
+        send(response, 400, { error: "BAD_REQUEST", message: "targetVersion must be a positive integer" });
+        return;
+      }
+      const skill = skills.rollback(skillId, body.scope, body.targetVersion);
+      // 回滚产生了新 Draft 版本（内容变化），对齐向量索引
+      await syncVectorsAfterTransition(embeddingSync, eventSink, {
+        trigger: "skill.rollback",
+        assetKind: "skill",
+        assetId: skill.id,
+        scope: skill.scope,
+      });
+      send(response, 200, skill);
+      return;
+    }
+    if (action === "validate") {
+      const body = await readJson(request) as { scope: Parameters<SkillService["validate"]>[1] };
+      send(response, 200, skills.validate(skillId, body.scope));
+      return;
+    }
+    if (action === "runs") {
+      const body = await readJson(request) as {
+        scope: Parameters<SkillService["recordRun"]>[0]["scope"];
+        event: SkillRunEventKind;
+        requestId?: string;
+        note?: string;
+      };
+      if (!body.event) {
+        send(response, 400, { error: "BAD_REQUEST", message: "event is required" });
+        return;
+      }
+      send(response, 200, skills.recordRun({
+        skillId,
+        scope: body.scope,
+        event: body.event,
+        ...(body.requestId === undefined ? {} : { requestId: body.requestId }),
+        ...(body.note === undefined ? {} : { note: body.note }),
+      }));
+      return;
+    }
+    // run-summary
+    const body = await readJson(request) as { scope: Parameters<SkillService["runSummary"]>[1] };
+    send(response, 200, skills.runSummary(skillId, body.scope));
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/v1/skills/search") {
     const body = await readJson(request) as {
       query: string;
@@ -303,6 +403,67 @@ async function route(
       return;
     }
     send(response, 200, { items: feedback.list(body.scope) });
+    return;
+  }
+
+  // Task 14：治理任务（冲突/重复扫描）、保留策略（过期待复核/续期）
+  if (method === "POST" && url.pathname === "/v1/governance/conflicts") {
+    const body = await readJson(request) as { scope: Scope };
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    send(response, 200, { items: conflicts ? conflicts.listTasks(body.scope) : [] });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/governance/retention/review") {
+    const body = await readJson(request) as { scope: Scope; staleDays?: number };
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    send(response, 200, retention!.review(body.scope, {
+      ...(body.staleDays === undefined ? {} : { staleDays: body.staleDays }),
+    }));
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/governance/retention/deprecate-expired") {
+    const body = await readJson(request) as { scope: Scope };
+    if (!body.scope || typeof body.scope !== "object") {
+      send(response, 400, { error: "BAD_REQUEST", message: "scope is required" });
+      return;
+    }
+    const result = retention!.deprecateExpired(body.scope);
+    // 降权改变了资产状态，成功后同步一次该作用域的向量索引
+    await syncVectorsAfterTransition(embeddingSync, eventSink, {
+      trigger: "retention.deprecate_expired",
+      assetKind: "memory",
+      assetId: result.memories[0]?.id ?? "none",
+      scope: body.scope,
+    });
+    send(response, 200, result);
+    return;
+  }
+
+  const memoryRenew = url.pathname.match(/^\/v1\/governance\/memories\/([^/]+)\/renew$/);
+  if (method === "POST" && memoryRenew) {
+    const body = await readJson(request) as {
+      scope: Parameters<RetentionService["renewMemory"]>[1];
+      validUntil?: string | null;
+    };
+    const asset = retention!.renewMemory(decodeURIComponent(memoryRenew[1]!), body.scope, {
+      ...(body.validUntil === undefined ? {} : { validUntil: body.validUntil }),
+    });
+    // 续期可能把资产带回 Verified（重新进入召回），对齐向量索引
+    await syncVectorsAfterTransition(embeddingSync, eventSink, {
+      trigger: "retention.renew",
+      assetKind: "memory",
+      assetId: asset.id,
+      scope: asset.scope,
+    });
+    send(response, 200, asset);
     return;
   }
 

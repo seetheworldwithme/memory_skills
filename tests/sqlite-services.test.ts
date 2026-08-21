@@ -133,7 +133,7 @@ test("memory recall preserves partial Latin substring matching", () => {
   }
 });
 
-test("deleting evidence archives derived memory", () => {
+test("deleting evidence marks derived verified memory for review instead of archiving", () => {
   const { repository, memory } = setup();
   try {
     const evidence = memory.capture({ id: "ev-3", scope: alice, role: "user", content: "temporary preference" });
@@ -148,8 +148,9 @@ test("deleting evidence archives derived memory", () => {
     });
     memory.transition(asset.id, alice, "verified");
     const impact = memory.deleteEvidence(evidence.id, alice);
-    assert.deepEqual(impact.archivedMemoryIds, [asset.id]);
-    assert.equal(memory.get(asset.id, alice)?.governance.status, "archived");
+    assert.deepEqual(impact.memories, [{ id: asset.id, from: "verified", to: "deprecated" }]);
+    // 待复核而非终态归档：Deprecated 可通过续期/重新验证恢复
+    assert.equal(memory.get(asset.id, alice)?.governance.status, "deprecated");
   } finally {
     repository.close();
   }

@@ -54,7 +54,7 @@ test("memory mutations require the owning scope", () => {
   }
 });
 
-test("editing a verified skill creates a draft version and evidence deletion archives it", () => {
+test("editing a verified skill creates a draft version and evidence deletion marks derived assets for review", () => {
   const repository = new SqliteRepository(":memory:");
   const memory = new MemoryService(repository);
   const skills = new SkillService(repository);
@@ -77,9 +77,13 @@ test("editing a verified skill creates a draft version and evidence deletion arc
       sourceEvidenceIds: ["skill-ev"],
     });
     assert.equal(updated.status, "draft");
+    // 删除证据后：当前版本是 Draft（未发布），保持 Draft 不变，
+    // 由质量校验器在 Verify 前暴露"来源悬空"，而不是打入终态
     const impact = memory.deleteEvidence("skill-ev", alice);
-    assert.deepEqual(impact.archivedSkillIds, [skill.id]);
-    assert.equal(skills.get(skill.id, alice)?.status, "archived");
+    assert.deepEqual(impact.skills, [{ id: skill.id, from: "draft", to: "draft" }]);
+    assert.equal(skills.get(skill.id, alice)?.status, "draft");
+    const report = skills.validate(skill.id, alice);
+    assert.ok(report.issues.some((issue) => issue.code === "SOURCE_DANGLING"));
   } finally {
     repository.close();
   }

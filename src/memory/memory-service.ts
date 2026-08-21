@@ -149,12 +149,18 @@ export class MemoryService {
       .map(({ asset, score: value }) => ({ ...asset, score: value, truncated: false }));
   }
 
-  deleteEvidence(id: string, scope: Scope): { evidenceId: string; archivedMemoryIds: string[]; archivedSkillIds: string[] } {
-    const affected = this.repository.deleteEvidenceAndArchiveDerived(id, scope, this.now().toISOString());
+  /**
+   * 删除证据并传播：Verified 派生资产标记为待复核（Deprecated，可恢复），
+   * 其余状态保持不变。返回每个受影响资产的转换明细，供调用方展示。
+   */
+  deleteEvidence(id: string, scope: Scope): {
+    evidenceId: string;
+    memories: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }>;
+    skills: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }>;
+  } {
     return {
       evidenceId: id,
-      archivedMemoryIds: affected.memoryIds,
-      archivedSkillIds: affected.skillIds,
+      ...this.repository.deleteEvidenceAndPropagate(id, scope, this.now().toISOString()),
     };
   }
 }

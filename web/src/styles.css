@@ -38,3 +38,65 @@ nav button:hover,.logout:hover { color:var(--ink); background:#19211c; } nav but
 .evidence-item .role-user { background:#1d2f45;color:#8db4e8; }
 .evidence-item .role-assistant { background:#332a18;color:#d9bd8a; }
 .evidence-item .role-system,.evidence-item .role-tool { background:#2c1f2e;color:#c49ad2; }
+
+/* ----- Task 13：Skill 质量校验 / 版本差异 / 回滚 / 使用效果 ----- */
+.quality-panel .quality-ok { color:#a9c98a; }
+.issue-list { list-style:none;margin:10px 0 0;padding:0;display:grid;gap:8px; }
+.issue { display:flex;align-items:flex-start;gap:10px;padding:9px 12px;border-radius:7px;font-size:12px;line-height:1.6; }
+.issue--error { border:1px solid #5b3531;background:#291b19;color:#ffb0aa; }
+.issue--warning { border:1px solid #4f4429;background:#2a2318;color:#e5c88a; }
+.issue-tag { flex:none;margin-top:1px;padding:1px 7px;border-radius:99px;font:10px ui-monospace,monospace; }
+.issue--error .issue-tag { background:#47231f;color:#ff9c96; }
+.issue--warning .issue-tag { background:#3d3117;color:#f2ce76; }
+.diff-panel .diff-summary { color:#c1cbc4; }
+.diff-panel .diff-empty { color:#7d8b81;font-size:12px; }
+.diff-list { list-style:none;margin:12px 0 0;padding:0;display:grid;gap:10px; }
+.diff-entry { border:1px solid #2b3730;border-radius:8px;padding:10px 13px;font-size:12px; }
+.diff-entry>b { display:block;color:#9ba79f;font:11px ui-monospace,monospace;letter-spacing:.04em; }
+.diff-entry--added { border-color:#3c5326; }
+.diff-entry--removed { border-color:#4a2f2b; }
+.diff-lines { display:inline-block;margin-top:6px;color:#7d8b81;font:10px ui-monospace,monospace; }
+.diff-block { margin:8px 0 0;padding:8px 11px;border-radius:6px;font:11px/1.7 "SFMono-Regular",Consolas,monospace;white-space:pre-wrap;word-break:break-word; }
+.diff-block--added { background:#15220f;color:#b7e08a;border-left:2px solid #6f9b3c; }
+.diff-block--removed { background:#241514;color:#f0a49d;border-left:2px solid #8a4d45;text-decoration:line;text-decoration-color:#8a4d4566; }
+.version-list { list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px; }
+.version-item { display:flex;align-items:center;gap:12px;padding:9px 12px;border:1px solid #2b3730;border-radius:7px;font-size:12px; }
+.version-item.is-current { border-color:#3c5326;background:#141d10; }
+.version-item small { color:#59655d; }
+.rollback-button { min-height:30px;padding:0 11px;font-size:11px;margin-left:auto; }
+.version-hint { display:block;margin-top:10px;color:#59655d;font-size:11px;line-height:1.6; }
+.run-verdict { margin:10px 0 0;font-size:13px; }
+.run-verdict--supported { color:#cfff6e; }
+.run-verdict--contradicted { color:#ff9c96; }
+.run-verdict--mixed { color:#f2ce76; }
+.run-verdict--no-evidence { color:#7d8b81; }
+.run-counts { display:flex;flex-wrap:wrap;gap:8px;margin-top:14px; }
+.run-count { display:flex;align-items:baseline;gap:7px;padding:7px 12px;border:1px solid #2b3730;border-radius:7px;background:#0e1410; }
+.run-count small { color:#67736b;font-size:11px; }
+.run-count strong { color:#dae6de;font:13px ui-monospace,monospace; }
+.run-hint { display:block;margin-top:11px;color:#59655d;font-size:11px;line-height:1.6; }
+
+/* ----- Task 14：治理工作台 ----- */
+.gov-stack { display:grid;gap:18px;max-width:980px; }
+.gov-card { border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:22px 24px; }
+.gov-card-head h2 { display:flex;align-items:center;gap:9px;margin:0;font:600 17px Georgia,"Songti SC",serif; }
+.gov-card-head p { margin:7px 0 0;color:var(--muted);font-size:12px;line-height:1.7; }
+.gov-count { padding:1px 9px;border-radius:99px;background:#202a23;color:#c5d0c8;font:11px ui-monospace,monospace; }
+.gov-empty { margin:14px 0 0;color:#7d8b81;font-size:12px; }
+.gov-task-list,.gov-item-list { list-style:none;margin:16px 0 0;padding:0;display:grid;gap:12px; }
+.gov-task { border:1px solid #2b3730;border-radius:9px;padding:14px 16px; }
+.gov-task-top { display:flex;align-items:center;justify-content:space-between; }
+.gov-kind { display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:99px;font:10px ui-monospace,monospace;letter-spacing:.06em; }
+.gov-kind--duplicate { background:#1d2f45;color:#8db4e8; }
+.gov-kind--conflict { background:#332b19;color:#e8c98d; }
+.gov-asset-kind { color:#67736b;font:10px ui-monospace,monospace;letter-spacing:.1em; }
+.gov-task-detail { margin:10px 0 0;color:#c1cbc4;font-size:13px;line-height:1.7; }
+.gov-task-assets { display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px; }
+.gov-asset { border:1px solid #232d27;border-radius:7px;padding:9px 11px;background:#0e1410; }
+.gov-asset p { margin:5px 0 0;color:#829087;font-size:11px;line-height:1.6; }
+.gov-task-suggestion { margin:10px 0 0;color:#7d8b81;font-size:11px;line-height:1.7; }
+.gov-item { display:flex;align-items:center;gap:16px;border:1px solid #2b3730;border-radius:9px;padding:12px 16px; }
+.gov-item-main { flex:1;min-width:0; }
+.gov-item-main p { margin:5px 0 0;color:#c1cbc4;font-size:13px; }
+.gov-item-main small { display:block;margin-top:5px;color:#59655d;font-size:11px; }
+.gov-item-actions { display:flex;gap:8px;flex:none; }

@@ -31,6 +31,16 @@ export function normalizeForDedup(content: string): string {
   return content.replace(/\s+/g, "").toLowerCase();
 }
 
+/** 是否命中占位内容黑名单：Skill 质量校验与提案校验共用同一份规则。 */
+export function containsPlaceholderContent(content: string): boolean {
+  return PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+/** 是否疑似包含敏感信息（密钥等）：入库前的硬性拦截规则。 */
+export function containsSensitiveContent(content: string): boolean {
+  return SENSITIVE_PATTERNS.some((pattern) => pattern.test(content));
+}
+
 /** 记忆候选校验，返回拒因列表（空数组表示通过）。 */
 export function validateMemoryCandidate(candidate: MemoryCandidate): string[] {
   const reasons: string[] = [];

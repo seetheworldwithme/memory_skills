@@ -38,6 +38,94 @@ export interface EvidenceRecord {
   capturedAt: string;
 }
 
+/** Skill 历史版本（含被替换时的治理状态快照）。 */
+export interface SkillVersionInfo {
+  skillId: string;
+  version: number;
+  content: string;
+  status: Status | null;
+  createdAt: string;
+}
+
+/** 语义化版本差异条目：frontmatter 字段或正文章节的增删改。 */
+export interface SkillDiffEntry {
+  kind: "field" | "section";
+  change: "added" | "removed" | "modified";
+  target: string;
+  before?: string;
+  after?: string;
+  addedLines?: string[];
+  removedLines?: string[];
+}
+
+export interface SkillDiffResult {
+  fromVersion: number | null;
+  toVersion: number;
+  entries: SkillDiffEntry[];
+  summary: string;
+}
+
+export interface SkillValidationIssue {
+  field: string;
+  code: string;
+  severity: "error" | "warning";
+  message: string;
+}
+
+export interface SkillValidationReport {
+  valid: boolean;
+  issues: SkillValidationIssue[];
+}
+
+/** Skill 使用事件四分类。 */
+export type SkillRunEventKind = "recalled" | "adopted" | "succeeded" | "failed";
+
+export interface SkillRunSummary {
+  skillId: string;
+  version: number;
+  runs: Record<SkillRunEventKind, number>;
+  feedback: { useful: number; irrelevant: number; incorrect: number; outdated: number };
+  verdict: "no-evidence" | "supported" | "mixed" | "contradicted";
+  verdictLabel: string;
+  hasEvidence: boolean;
+}
+
+/** 治理任务：同一作用域内重复或疑似冲突的资产对。 */
+export interface GovernanceTask {
+  id: string;
+  kind: "duplicate" | "conflict";
+  assetKind: "memory" | "skill";
+  assetIds: string[];
+  assets: Array<{ id: string; preview: string; name?: string }>;
+  detail: string;
+  suggestion: string;
+}
+
+export interface RetentionReviewItem {
+  id: string;
+  kind: "memory" | "skill";
+  status: Status;
+  preview: string;
+  validUntil?: string;
+  lastVerifiedAt?: string;
+  updatedAt: string;
+}
+
+export interface RetentionReview {
+  expiredMemories: RetentionReviewItem[];
+  staleMemories: RetentionReviewItem[];
+  staleSkills: RetentionReviewItem[];
+  generatedAt: string;
+}
+
+/** 删除证据前的只读影响预览。 */
+export interface EvidenceDeletionImpact {
+  evidence: { id: string; role: string; capturedAt: string; contentPreview: string };
+  memories: Array<{ id: string; status: Status; contentPreview: string; wouldTransitionTo: Status | null }>;
+  skills: Array<{ id: string; name: string; version: number; status: Status; wouldTransitionTo: Status | null }>;
+  pendingReviewCount: number;
+}
+
 /** 提案 Job 报告（与后端 ProposalJobReport 对应）。 */
 export interface ProposalRunReport<TCreated> {
   kind: "memory" | "skill";
@@ -137,6 +225,61 @@ export class ApiClient {
 
   async transitionSkill(id: string, target: Status): Promise<void> {
     await this.request(`/v1/skills/${encodeURIComponent(id)}/status`, { scope: LOCAL_SCOPE, target });
+  }
+
+  /** 版本历史（新版本在前）。 */
+  async listSkillVersions(id: string): Promise<SkillVersionInfo[]> {
+    return (await this.request<{ items: SkillVersionInfo[] }>(`/v1/skills/${encodeURIComponent(id)}/versions`, { scope: LOCAL_SCOPE })).items;
+  }
+
+  /** 语义化差异：默认对照最近已发布版本与当前版本。 */
+  async skillDiff(id: string, options: { fromVersion?: number; toVersion?: number } = {}): Promise<SkillDiffResult> {
+    return this.request(`/v1/skills/${encodeURIComponent(id)}/diff`, { scope: LOCAL_SCOPE, ...options });
+  }
+
+  /** 回滚到历史版本：追加为新 Draft，需要再次人工 Verify。 */
+  async rollbackSkill(id: string, targetVersion: number): Promise<SkillDocument> {
+    return this.request(`/v1/skills/${encodeURIComponent(id)}/rollback`, { scope: LOCAL_SCOPE, targetVersion });
+  }
+
+  /** 质量校验报告：error 级问题不建议 Verify。 */
+  async validateSkill(id: string): Promise<SkillValidationReport> {
+    return this.request(`/v1/skills/${encodeURIComponent(id)}/validate`, { scope: LOCAL_SCOPE });
+  }
+
+  /** 记录一次 Skill 使用事件（被召回/被采用/成功/失败）。 */
+  async recordSkillRun(id: string, event: SkillRunEventKind, options: { requestId?: string; note?: string } = {}): Promise<void> {
+    await this.request(`/v1/skills/${encodeURIComponent(id)}/runs`, { scope: LOCAL_SCOPE, event, ...options });
+  }
+
+  /** 使用效果汇总：只有落库的使用证据才支撑"有效"结论。 */
+  async skillRunSummary(id: string): Promise<SkillRunSummary> {
+    return this.request(`/v1/skills/${encodeURIComponent(id)}/run-summary`, { scope: LOCAL_SCOPE });
+  }
+
+  /** 冲突/重复治理任务（确定性扫描，处置资产后任务自动消失）。 */
+  async listConflicts(): Promise<GovernanceTask[]> {
+    return (await this.request<{ items: GovernanceTask[] }>("/v1/governance/conflicts", { scope: LOCAL_SCOPE })).items;
+  }
+
+  /** 过期与长期未验证的待复核清单（只读）。 */
+  async retentionReview(): Promise<RetentionReview> {
+    return this.request("/v1/governance/retention/review", { scope: LOCAL_SCOPE });
+  }
+
+  /** 把已过期的 Verified 记忆降权为待复核（Deprecated），不物理删除。 */
+  async deprecateExpired(): Promise<{ memories: Array<{ id: string; from: Status; to: Status }> }> {
+    return this.request("/v1/governance/retention/deprecate-expired", { scope: LOCAL_SCOPE });
+  }
+
+  /** 续期记忆：延长有效期（ISO 日期）或传 null 清除期限；因过期降权的资产恢复 Verified。 */
+  async renewMemory(id: string, validUntil: string | null): Promise<void> {
+    await this.request(`/v1/governance/memories/${encodeURIComponent(id)}/renew`, { scope: LOCAL_SCOPE, validUntil });
+  }
+
+  /** 删除证据前的只读影响预览。 */
+  async evidenceImpact(id: string): Promise<EvidenceDeletionImpact> {
+    return this.request(`/v1/evidence/${encodeURIComponent(id)}/impact`, { scope: LOCAL_SCOPE });
   }
 
   /** 提交显式反馈：只采集人工判断，不会自动改写资产。 */

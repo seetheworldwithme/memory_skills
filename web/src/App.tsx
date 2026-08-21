@@ -1,12 +1,13 @@
-import { BrainCircuit, KeyRound, LogOut, ShieldCheck, Sparkles, Wrench } from "lucide-react";
+import { BrainCircuit, KeyRound, LogOut, Scale, ShieldCheck, Sparkles, Wrench } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiClient, login } from "./lib/api";
 import { clearAccessKey, readAccessKey, saveAccessKey } from "./lib/session";
 import { MemoryPage } from "./pages/MemoryPage";
 import { SkillsPage } from "./pages/SkillsPage";
+import { GovernancePage } from "./pages/GovernancePage";
 
-type Page = "memory" | "skills";
+type Page = "memory" | "skills" | "governance";
 
 export function App() {
   const [storedKey] = useState(() => readAccessKey());
@@ -33,7 +34,7 @@ export function App() {
 
   if (!accessKey || !api) return <LoginScreen onLogin={(key) => { saveAccessKey(key); setAccessKey(key); }} />;
 
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark"><BrainCircuit /></span><div><strong>Memory Skills</strong><small>LOCAL CONSOLE</small></div></div><nav><p>资产</p><button className={page === "memory" ? "active" : ""} onClick={() => setPage("memory")}><BrainCircuit size={18} />Chat Memory</button><button className={page === "skills" ? "active" : ""} onClick={() => setPage("skills")}><Wrench size={18} />Skill</button></nav><div className="sidebar-foot"><div className="local-status"><span /><div><strong>本地服务</strong><small>127.0.0.1 · 已连接</small></div></div><button className="logout" onClick={logout}><LogOut size={16} />退出登录</button></div></aside><main className="app-main"><div className="topline"><span><ShieldCheck size={15} />治理优先模式</span><span className="scope-label">LOCAL / DEFAULT</span></div>{page === "memory" ? <MemoryPage api={api} /> : <SkillsPage api={api} />}</main></div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark"><BrainCircuit /></span><div><strong>Memory Skills</strong><small>LOCAL CONSOLE</small></div></div><nav><p>资产</p><button className={page === "memory" ? "active" : ""} onClick={() => setPage("memory")}><BrainCircuit size={18} />Chat Memory</button><button className={page === "skills" ? "active" : ""} onClick={() => setPage("skills")}><Wrench size={18} />Skill</button></nav><nav><p>治理</p><button className={page === "governance" ? "active" : ""} onClick={() => setPage("governance")}><Scale size={18} />治理工作台</button></nav><div className="sidebar-foot"><div className="local-status"><span /><div><strong>本地服务</strong><small>127.0.0.1 · 已连接</small></div></div><button className="logout" onClick={logout}><LogOut size={16} />退出登录</button></div></aside><main className="app-main"><div className="topline"><span><ShieldCheck size={15} />治理优先模式</span><span className="scope-label">LOCAL / DEFAULT</span></div>{page === "memory" ? <MemoryPage api={api} /> : page === "skills" ? <SkillsPage api={api} /> : <GovernancePage api={api} />}</main></div>;
 }
 
 function LoginScreen({ onLogin }: { onLogin: (accessKey: string) => void }) {

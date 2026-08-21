@@ -170,7 +170,32 @@ searchable, non-whitespace text.
 DELETE /v1/evidence/:id
 ```
 
-The response reports directly derived memory assets that were archived.
+删除证据并传播到派生资产：来源已消失的 **Verified** 资产默认标记为待复核
+（`deprecated`，可通过续期/重新验证恢复），不再直接打入终态 `archived`；
+Draft 等其余状态保持不变，其"来源悬空"会在 Skill 质量校验中暴露。
+返回每个受影响资产的转换明细：
+
+```json
+{
+  "evidenceId": "ev-1",
+  "memories": [{ "id": "mem-1", "from": "verified", "to": "deprecated" }],
+  "skills": [{ "id": "skill-1", "from": "draft", "to": "draft" }]
+}
+```
+
+## Evidence deletion impact（删除前影响预览）
+
+```http
+POST /v1/evidence/:id/impact
+```
+
+```json
+{ "scope": { "userId": "u1", "teamId": "t1", "agentId": "a1" } }
+```
+
+只读预览：返回证据本体（含截断预览）与全部派生 Memory/Skill，以及每个资产
+删除后将转换到的状态（`wouldTransitionTo`；`null` 表示保持不变），
+`pendingReviewCount` 汇总将进入待复核的 Verified 资产数。不改动任何数据。
 
 ## Get evidence by ids
 
@@ -302,3 +327,56 @@ POST /v1/skills/search
 ```
 
 Skill updates require `expectedVersion`. A stale version returns HTTP 409.
+`PUT /v1/skills/:id` 可选传 `description`（与内容 frontmatter 一并更新）；
+创建与更新都会拒绝包含疑似密钥等敏感信息的内容。
+
+## Skill lifecycle（质量校验、版本差异、回滚、使用记录）
+
+```text
+POST /v1/skills/:id/validate      质量校验报告
+POST /v1/skills/:id/versions      版本历史（新版本在前）
+POST /v1/skills/:id/diff          语义化版本差异
+POST /v1/skills/:id/rollback      回滚（追加为新 Draft）
+POST /v1/skills/:id/runs          记录使用事件
+POST /v1/skills/:id/run-summary   使用效果汇总
+```
+
+- `validate`：校验名称、描述、触发条件、步骤、失败处理、验证方式、来源和
+  敏感信息。错误（error）表示不建议 Verify 的硬伤（格式、占位、敏感信息、
+  来源悬空）；警告（warning）表示质量短板，由人决定是否放行。只产出报告，
+  不阻塞治理操作。
+- `versions`：每个版本携带被替换时的治理状态快照（`status`，历史表升级前的
+  版本可能为 `null`）。
+- `diff`：默认对照"最近一个已发布版本"（状态快照为 verified/deprecated 的
+  最大历史版本）与当前版本；可显式传 `fromVersion`/`toVersion`。结果按
+  frontmatter 字段与正文章节两个层面给出增删改与行级明细，附中文摘要。
+- `rollback`：`{ "targetVersion": 1 }` 把历史版本内容追加为**新 Draft 版本**
+  （历史版本永不覆盖），仍需人工 Verify；来源沿用当前仍存在的证据。
+- `runs`：`event` 四选一（`recalled` 被召回 / `adopted` 被采用 /
+  `succeeded` 任务成功 / `failed` 任务失败），可关联 `requestId` 与 `note`。
+- `run-summary`：使用事件计数 + 关联反馈四分类计数 + 确定性结论
+  （`no-evidence` / `supported` / `mixed` / `contradicted`）。
+  **没有使用证据时不宣称 Skill 有效**；记录只用于评测与治理建议，
+  不自动改写资产。
+
+## Governance（冲突、过期与保留策略）
+
+```text
+POST /v1/governance/conflicts
+POST /v1/governance/retention/review
+POST /v1/governance/retention/deprecate-expired
+POST /v1/governance/memories/:id/renew
+```
+
+- `conflicts`：确定性扫描（不调用模型）同一作用域内的 Verified 资产：
+  归一化内容一致或互相包含 → `duplicate`；检索词重合度 ≥ 0.6 但内容不同 →
+  `conflict`（疑似矛盾）。任务 ID 确定（kind + 资产 ID），按需计算不落库；
+  处置其中一条资产后任务自动消失。Skill 只比较正文章节（frontmatter 的
+  name/description 不同不参与重复判断）。
+- `retention/review`：过期待复核清单（`validUntil` 已过但仍为 Verified 的
+  记忆）与长期未验证清单（默认 90 天，`staleDays` 可调；仅提示，无自动动作）。
+- `retention/deprecate-expired`：把过期 Verified 记忆降权为 `deprecated`
+  （待复核），**绝不物理删除**；幂等，重复执行无副作用。
+- `memories/:id/renew`：用户确认续期。`validUntil` 传 ISO 日期延长有效期，
+  传 `null` 清除期限（长期有效）；若资产此前因过期被降权，自动恢复
+  `verified`。仅 Verified/Deprecated 资产可续期。

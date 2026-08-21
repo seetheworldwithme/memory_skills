@@ -4,7 +4,8 @@ import type { GovernedStatus } from "../governance/lifecycle.js";
 import type { GovernanceMetadata, Scope, SourceReference } from "../governance/types.js";
 import type { FeedbackRecord } from "../feedback/types.js";
 import type { Evidence, MemoryAsset, MemoryLayer } from "../memory/types.js";
-import type { SkillDocument } from "../skills/types.js";
+import type { SkillDocument, SkillVersionRecord } from "../skills/types.js";
+import type { SkillRunRecord } from "../skills/skill-run-record.js";
 
 type DbRow = Record<string, unknown>;
 
@@ -72,6 +73,7 @@ export class SqliteRepository {
         version INTEGER NOT NULL,
         content TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        status TEXT,
         PRIMARY KEY(skill_id, version)
       );
 
@@ -103,7 +105,45 @@ export class SqliteRepository {
 
       CREATE INDEX IF NOT EXISTS feedback_scope_time
       ON feedback(user_id, team_id, agent_id, IFNULL(session_id, ''), created_at DESC);
+
+      -- Skill 使用记录：与 feedback 一样刻意不加指向资产表的外键，
+      -- 资产归档后使用证据仍保留，作为"是否有效"的历史依据
+      CREATE TABLE IF NOT EXISTS skill_runs (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL,
+        skill_version INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
+        team_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        session_id TEXT,
+        event TEXT NOT NULL CHECK(event IN ('recalled','adopted','succeeded','failed')),
+        request_id TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS skill_runs_scope_time
+      ON skill_runs(user_id, team_id, agent_id, IFNULL(session_id, ''), created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS skill_runs_skill_time
+      ON skill_runs(skill_id, created_at DESC);
     `);
+
+    // 旧库升级：skill_versions 在 v0.6 之前没有 status 列（版本治理状态快照）。
+    // 新列允许为空——历史版本的状态已不可考，只有当前版本用 skills.status 回填。
+    this.ensureColumn("skill_versions", "status", "TEXT", `
+      UPDATE skill_versions
+      SET status = (SELECT s.status FROM skills s WHERE s.id = skill_versions.skill_id)
+      WHERE version = (SELECT s.current_version FROM skills s WHERE s.id = skill_versions.skill_id)
+    `);
+  }
+
+  /** 幂等加列：旧库升级用；backfill 在列新建成时执行一次。 */
+  private ensureColumn(table: string, column: string, definition: string, backfillSql?: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((row) => row.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    if (backfillSql) this.db.exec(backfillSql);
   }
 
   captureEvidence(evidence: Evidence): Evidence {
@@ -228,35 +268,66 @@ export class SqliteRepository {
     return rows.map(rowToMemory);
   }
 
-  deleteEvidenceAndArchiveDerived(id: string, scope: Scope, now: string): { memoryIds: string[]; skillIds: string[] } {
+  /**
+   * 删除证据并传播到派生资产（Task 14 语义调整）：
+   * 来源已消失的 Verified 资产默认标记为待复核（deprecated，可恢复），
+   * 不再直接打入终态 archived，也不静默保持 Verified；
+   * Draft 等其余状态保持不变，由质量校验器在 Verify 前暴露"来源悬空"。
+   */
+  deleteEvidenceAndPropagate(
+    id: string,
+    scope: Scope,
+    now: string,
+  ): {
+    memories: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }>;
+    skills: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }>;
+  } {
     if (!this.getEvidenceScoped(id, scope)) throw new Error(`evidence not found: ${id}`);
-    const rows = this.db.prepare("SELECT memory_id FROM memory_evidence WHERE evidence_id = ? ORDER BY memory_id")
+    const memoryRows = this.db.prepare("SELECT memory_id FROM memory_evidence WHERE evidence_id = ? ORDER BY memory_id")
       .all(id) as DbRow[];
-    const ids = rows.map((row) => String(row.memory_id));
     const skillRows = this.db.prepare("SELECT skill_id FROM skill_evidence WHERE evidence_id = ? ORDER BY skill_id")
       .all(id) as DbRow[];
-    const skillIds = skillRows.map((row) => String(row.skill_id));
+
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      for (const memoryId of ids) {
+      const memoryTransitions: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }> = [];
+      for (const row of memoryRows) {
+        const memoryId = String(row.memory_id);
         const asset = this.getMemory(memoryId);
         if (!asset) continue;
-        asset.governance.status = "archived";
-        asset.governance.updatedAt = now;
-        this.db.prepare("UPDATE memory_assets SET governance_json = ? WHERE id = ?")
-          .run(JSON.stringify(asset.governance), memoryId);
+        const from = asset.governance.status;
+        const to: GovernedStatus = from === "verified" ? "deprecated" : from;
+        if (to !== from) {
+          asset.governance.status = to;
+          asset.governance.updatedAt = now;
+          this.db.prepare("UPDATE memory_assets SET governance_json = ? WHERE id = ?")
+            .run(JSON.stringify(asset.governance), memoryId);
+        }
+        memoryTransitions.push({ id: memoryId, from, to });
       }
-      for (const skillId of skillIds) {
-        this.db.prepare("UPDATE skills SET status = 'archived', updated_at = ? WHERE id = ?")
-          .run(now, skillId);
+      const skillTransitions: Array<{ id: string; from: GovernedStatus; to: GovernedStatus }> = [];
+      for (const row of skillRows) {
+        const skillId = String(row.skill_id);
+        const skill = this.getSkill(skillId);
+        if (!skill) continue;
+        const from = skill.status;
+        const to: GovernedStatus = from === "verified" ? "deprecated" : from;
+        if (to !== from) {
+          this.db.prepare("UPDATE skills SET status = ?, updated_at = ? WHERE id = ?").run(to, now, skillId);
+          this.db.prepare(`
+            UPDATE skill_versions SET status = ?
+            WHERE skill_id = ? AND version = (SELECT current_version FROM skills WHERE id = ?)
+          `).run(to, skillId, skillId);
+        }
+        skillTransitions.push({ id: skillId, from, to });
       }
       this.db.prepare("DELETE FROM evidence WHERE id = ?").run(id);
       this.db.exec("COMMIT");
+      return { memories: memoryTransitions, skills: skillTransitions };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return { memoryIds: ids, skillIds };
   }
 
   insertSkill(skill: SkillDocument): SkillDocument {
@@ -280,8 +351,8 @@ export class SqliteRepository {
         skill.createdAt,
         skill.updatedAt,
       );
-      this.db.prepare("INSERT INTO skill_versions(skill_id,version,content,created_at) VALUES (?,?,?,?)")
-        .run(skill.id, skill.version, skill.content, skill.createdAt);
+      this.db.prepare("INSERT INTO skill_versions(skill_id,version,content,created_at,status) VALUES (?,?,?,?,?)")
+        .run(skill.id, skill.version, skill.content, skill.createdAt, skill.status);
       const link = this.db.prepare("INSERT INTO skill_evidence(skill_id,evidence_id) VALUES (?,?)");
       for (const source of skill.sources) link.run(skill.id, source.evidenceId);
       this.db.exec("COMMIT");
@@ -307,6 +378,7 @@ export class SqliteRepository {
     content: string,
     sources: SourceReference[],
     now: string,
+    description?: string,
   ): SkillDocument | undefined {
     const skill = this.getSkill(id);
     if (!skill || skill.version !== expectedVersion) return undefined;
@@ -314,15 +386,20 @@ export class SqliteRepository {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = this.db.prepare(`
-        UPDATE skills SET current_version = ?, status = 'draft', sources_json = ?, updated_at = ?
+        UPDATE skills
+        SET current_version = ?, status = 'draft', sources_json = ?, updated_at = ?${description === undefined ? "" : ", description = ?"}
         WHERE id = ? AND current_version = ?
-      `).run(next, JSON.stringify(sources), now, id, expectedVersion);
+      `).run(...([
+        next, JSON.stringify(sources), now,
+        ...(description === undefined ? [] : [description]),
+        id, expectedVersion,
+      ]));
       if (result.changes !== 1) {
         this.db.exec("ROLLBACK");
         return undefined;
       }
-      this.db.prepare("INSERT INTO skill_versions(skill_id,version,content,created_at) VALUES (?,?,?,?)")
-        .run(id, next, content, now);
+      this.db.prepare("INSERT INTO skill_versions(skill_id,version,content,created_at,status) VALUES (?,?,?,?,?)")
+        .run(id, next, content, now, "draft");
       this.db.prepare("DELETE FROM skill_evidence WHERE skill_id = ?").run(id);
       const link = this.db.prepare("INSERT INTO skill_evidence(skill_id,evidence_id) VALUES (?,?)");
       for (const source of sources) link.run(id, source.evidenceId);
@@ -335,10 +412,41 @@ export class SqliteRepository {
   }
 
   updateSkillStatus(id: string, status: GovernedStatus, now: string): SkillDocument {
-    const result = this.db.prepare("UPDATE skills SET status = ?, updated_at = ? WHERE id = ?")
-      .run(status, now, id);
-    if (result.changes !== 1) throw new Error(`skill not found: ${id}`);
-    return this.getSkill(id)!;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db.prepare("UPDATE skills SET status = ?, updated_at = ? WHERE id = ?")
+        .run(status, now, id);
+      if (result.changes !== 1) {
+        this.db.exec("ROLLBACK");
+        throw new Error(`skill not found: ${id}`);
+      }
+      // 版本状态快照与主表保持同步：当前版本行的 status 就是它此刻的治理状态
+      this.db.prepare(`
+        UPDATE skill_versions SET status = ?
+        WHERE skill_id = ? AND version = (SELECT current_version FROM skills WHERE id = ?)
+      `).run(status, id, id);
+      this.db.exec("COMMIT");
+      return this.getSkill(id)!;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** 取指定历史版本（含内容与状态快照）；不存在返回 undefined。 */
+  getSkillVersion(id: string, version: number): SkillVersionRecord | undefined {
+    const row = this.db.prepare(
+      "SELECT * FROM skill_versions WHERE skill_id = ? AND version = ?",
+    ).get(id, version) as DbRow | undefined;
+    return row ? rowToSkillVersion(row) : undefined;
+  }
+
+  /** 版本历史，新版本在前。 */
+  listSkillVersions(id: string): SkillVersionRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY version DESC
+    `).all(id) as DbRow[];
+    return rows.map(rowToSkillVersion);
   }
 
   listSkills(scope: Scope): SkillDocument[] {
@@ -385,6 +493,77 @@ export class SqliteRepository {
     `).all(scope.userId, scope.teamId, scope.agentId, scope.sessionId ?? null) as DbRow[];
     return rows.map(rowToFeedback);
   }
+
+  /** 统计某资产在某作用域的四类反馈计数（治理建议与使用效果汇总用）。 */
+  countFeedbackByKind(
+    assetKind: "memory" | "skill",
+    assetId: string,
+    scope: Scope,
+  ): { useful: number; irrelevant: number; incorrect: number; outdated: number } {
+    const rows = this.db.prepare(`
+      SELECT kind, COUNT(*) AS count FROM feedback
+      WHERE asset_kind = ? AND asset_id = ?
+      AND user_id = ? AND team_id = ? AND agent_id = ? AND session_id IS ?
+      GROUP BY kind
+    `).all(assetKind, assetId, scope.userId, scope.teamId, scope.agentId, scope.sessionId ?? null) as DbRow[];
+    const counts = { useful: 0, irrelevant: 0, incorrect: 0, outdated: 0 };
+    for (const row of rows) counts[String(row.kind) as keyof typeof counts] = Number(row.count);
+    return counts;
+  }
+
+  /** 落库一条 Skill 使用记录。 */
+  insertSkillRun(record: SkillRunRecord): SkillRunRecord {
+    this.db.prepare(`
+      INSERT INTO skill_runs
+      (id,skill_id,skill_version,user_id,team_id,agent_id,session_id,event,request_id,note,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      record.id,
+      record.skillId,
+      record.skillVersion,
+      record.scope.userId,
+      record.scope.teamId,
+      record.scope.agentId,
+      record.scope.sessionId ?? null,
+      record.event,
+      record.requestId ?? null,
+      record.note ?? null,
+      record.createdAt,
+    );
+    return record;
+  }
+
+  /** 按事件类型统计某 Skill 的使用记录数。 */
+  countSkillRuns(skillId: string): Partial<Record<SkillRunRecord["event"], number>> {
+    const rows = this.db.prepare(
+      "SELECT event, COUNT(*) AS count FROM skill_runs WHERE skill_id = ? GROUP BY event",
+    ).all(skillId) as DbRow[];
+    const counts: Partial<Record<SkillRunRecord["event"], number>> = {};
+    for (const row of rows) counts[String(row.event) as SkillRunRecord["event"]] = Number(row.count);
+    return counts;
+  }
+
+  /** 更新记忆有效期（续期/清除期限）：只改 governance 元数据，不动状态与内容。 */
+  updateMemoryValidity(
+    id: string,
+    patch: { validFrom?: string | null; validUntil?: string | null },
+    now: string,
+  ): MemoryAsset {
+    const asset = this.getMemory(id);
+    if (!asset) throw new Error(`memory not found: ${id}`);
+    if (patch.validFrom !== undefined) {
+      if (patch.validFrom === null) delete asset.governance.validFrom;
+      else asset.governance.validFrom = patch.validFrom;
+    }
+    if (patch.validUntil !== undefined) {
+      if (patch.validUntil === null) delete asset.governance.validUntil;
+      else asset.governance.validUntil = patch.validUntil;
+    }
+    asset.governance.updatedAt = now;
+    this.db.prepare("UPDATE memory_assets SET governance_json = ? WHERE id = ?")
+      .run(JSON.stringify(asset.governance), id);
+    return asset;
+  }
 }
 
 function rowToEvidence(row: DbRow): Evidence {
@@ -420,6 +599,16 @@ function rowToSkill(row: DbRow): SkillDocument {
     sources: JSON.parse(String(row.sources_json)) as SourceReference[],
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function rowToSkillVersion(row: DbRow): SkillVersionRecord {
+  return {
+    skillId: String(row.skill_id),
+    version: Number(row.version),
+    content: String(row.content),
+    status: row.status == null ? null : String(row.status) as SkillVersionRecord["status"],
+    createdAt: String(row.created_at),
   };
 }
 
