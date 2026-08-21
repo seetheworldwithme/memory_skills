@@ -11,7 +11,7 @@ export interface LlmProviderConfig {
   model: string;
   /** 兼容端点地址；OpenAI 兼容 Provider 默认 https://api.openai.com/v1。 */
   baseUrl?: string;
-  /** 单次尝试超时毫秒数，默认 30000。 */
+  /** 单次尝试超时毫秒数，默认 120000（全量捕获后大证据提案常见超 30s）。 */
   timeoutMs?: number;
   /** 额外重试次数，默认 2。 */
   maxRetries?: number;

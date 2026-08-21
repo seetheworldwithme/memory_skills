@@ -81,7 +81,7 @@ interface LlmProvider {
 | `MEMORY_SKILLS_LLM_PROVIDER` | `mock` | `mock` / `openai` / 自定义注册名 |
 | `MEMORY_SKILLS_LLM_MODEL` | `mock-model`（仅 mock） | 模型名，非 mock 必填 |
 | `MEMORY_SKILLS_LLM_BASE_URL` | `https://api.openai.com/v1` | 兼容端点地址 |
-| `MEMORY_SKILLS_LLM_TIMEOUT_MS` | `30000` | 单次尝试超时 |
+| `MEMORY_SKILLS_LLM_TIMEOUT_MS` | `120000` | 单次尝试超时（全量捕获后大证据提案常见超 30s） |
 | `MEMORY_SKILLS_LLM_MAX_RETRIES` | `2` | 额外重试次数 |
 | `MEMORY_SKILLS_LLM_RESPONSE_MODE` | `json_object` | `json_object` / `json_schema` |
 | `MEMORY_SKILLS_LLM_API_KEY_ENV` | `OPENAI_API_KEY`（openai） | 密钥所在环境变量名 |

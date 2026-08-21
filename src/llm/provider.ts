@@ -139,7 +139,7 @@ export function asLlmProviderError(error: unknown): LlmProviderError {
 
 /** 韧性装饰器选项。 */
 export interface LlmResilienceOptions {
-  /** 单次尝试超时毫秒数，默认 30000。 */
+  /** 单次尝试超时毫秒数，默认 120000。 */
   timeoutMs?: number;
   /** 额外重试次数（总尝试 = 1 + maxRetries），默认 2。 */
   maxRetries?: number;
@@ -175,7 +175,9 @@ class ResilientLlmProvider implements LlmProvider {
   }
 
   async structured<T>(request: LlmStructuredRequest<T>): Promise<LlmStructuredResponse<T>> {
-    const timeoutMs = this.options.timeoutMs ?? 30_000;
+    // 全量捕获后提案证据可达数万字符（约两三万 tokens 输入），中转端点排队加生成
+    // 常超 30s；默认放宽到 120s（仍可经 MEMORY_SKILLS_LLM_TIMEOUT_MS 覆盖）
+    const timeoutMs = this.options.timeoutMs ?? 120_000;
     const maxRetries = this.options.maxRetries ?? 2;
     const baseDelayMs = this.options.baseDelayMs ?? 500;
     const maxDelayMs = this.options.maxDelayMs ?? 8_000;
